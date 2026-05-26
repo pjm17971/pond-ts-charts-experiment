@@ -1,122 +1,70 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
-import './App.css'
+import { useState } from 'react';
+import { M1LineChart } from './charts/M1LineChart';
+
+type N = 100_000 | 1_000_000 | 10_000_000;
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [n, setN] = useState<N>(100_000);
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
-        </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.tsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
-        </button>
-      </section>
+    <div style={{ padding: 24, maxWidth: 1400, margin: '0 auto' }}>
+      <h1 style={{ marginTop: 0 }}>pond-ts charts experiment — M1</h1>
+      <p>
+        Single-column line chart at scale. Pan with drag; zoom with wheel.
+        See <code>friction-notes/M1-line-chart-scaling.md</code> for the
+        report.
+      </p>
 
-      <div className="ticks"></div>
+      <div
+        style={{
+          marginBottom: 16,
+          display: 'flex',
+          gap: 8,
+          alignItems: 'center',
+        }}
+      >
+        <label>Row count:</label>
+        {([100_000, 1_000_000, 10_000_000] as const).map((option) => (
+          <button
+            key={option}
+            type="button"
+            onClick={() => setN(option)}
+            style={{
+              padding: '6px 12px',
+              background: n === option ? '#3a8fff' : '#222',
+              color: n === option ? '#fff' : '#9f9',
+              border: '1px solid #333',
+              borderRadius: 4,
+              fontFamily: 'monospace',
+              cursor: 'pointer',
+            }}
+          >
+            {option.toLocaleString()}
+          </button>
+        ))}
+      </div>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
-        </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
+      <M1LineChart n={n} />
 
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
-  )
+      <details style={{ marginTop: 24, color: '#888' }}>
+        <summary>Hint</summary>
+        <ul>
+          <li>Drag the canvas horizontally to pan.</li>
+          <li>Scroll up to zoom in (smaller visible window), down to zoom out.</li>
+          <li>
+            Watch the stats bar — the median render time tells you the
+            sustained frame budget cost; FPS shows real per-frame perf.
+          </li>
+          <li>
+            At 10M rows the build cost is the dominant first-paint cost;
+            steady-state render stays fast because the chart only walks
+            the visible window via <code>bisect</code> +{' '}
+            <code>subarray</code>.
+          </li>
+        </ul>
+      </details>
+    </div>
+  );
 }
 
-export default App
+export default App;

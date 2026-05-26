@@ -24,7 +24,7 @@ One file per milestone: `M<N>-<topic>.md`. Each report covers:
 
 | File | Workload | Status |
 | --- | --- | --- |
-| M1 (TBD) | Single-column line chart, scaling | Pending |
+| [`M1-line-chart-scaling.md`](M1-line-chart-scaling.md) | Single-column line chart, scaling | Shipped 2026-05-26 — 6 library-actionable items |
 | M2 (TBD) | Multi-column overlay | Pending |
 | M3 (TBD) | Chunked-column rendering | Pending |
 | M4 (TBD) | Range slicing for zoom | Pending |
