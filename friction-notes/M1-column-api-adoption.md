@@ -5,6 +5,17 @@
 locally from `/Users/peter.murphy/Code/pond/packages/core`.
 Re-runs against `pond-ts@0.18.0` once that publishes.
 
+## What's in this note
+
+- M1.1 (commit
+  [`e89eca1`](https://github.com/pjm17971/pond-ts-charts-experiment/commit/e89eca1))
+  — the original "rewrite from spike accessors to the column-
+  centric idiom" pass. Friction items F1–F6 status, new items
+  NF1–NF3.
+- M1.2 (this commit) — added a below-canvas hover-value readout
+  to exercise `col.at(i)`. Surfaced NF4 (`KeyColumn.at` gap)
+  and confirmed `col.at` works cleanly for the value side.
+
 ## Why this addendum exists
 
 [`M1-line-chart-scaling.md`](./M1-line-chart-scaling.md) shipped
@@ -250,6 +261,60 @@ This is a partial duplicate of F1's carry-forward: a
 `col.toFloat64Array()` would let the 1:1 path stay storage-agnostic
 without paying the scan closure cost.
 
+### NF4. Hover/tooltip flow wants `keyColumn().at(i)`
+
+Added a below-canvas readout in commit on top of the M1.1 rewrite:
+hover the chart → show `idx`, the row's timestamp, the row's value.
+
+The value side is clean — `col.at(idx)` from 8b is the right shape:
+
+```ts
+const value = seriesData.valueCol.at(idx); // number | undefined
+```
+
+One call, no narrowing, returns the type the schema declared, and
+the `| undefined` neatly covers "cursor outside data" rather than
+needing a separate guard. Positive signal: this is the **first
+place M1 actually uses `col.at(idx)`** (the render path uses raw
+`.values` for the inline canvas loop), and it worked first try.
+
+The key-axis side does **not** have an equivalent yet. To show the
+hovered row's timestamp, the chart reaches for raw `.begin`:
+
+```ts
+const time = seriesData.xs[idx]; // raw Float64Array access
+```
+
+That's the spike pattern, not the column-centric one. `KeyColumn`
+doesn't expose an `.at(i)` method in v1. The substrate has the
+machinery (`read(i)` on each key-column subtype), but it isn't on
+the public surface. Step 8d (`KeyColumn.at(i)` + `.slice(s, e)`)
+is supposed to close this — PLAN.md calls it out as "unblocks
+experiment M5 (heatmap) and tooltip / crosshair flows", and the
+tooltip case is exactly this hover readout.
+
+The friction here is small in code-shape terms (`xs[idx]` is one
+line either way), but it's load-bearing for the **adapter
+abstraction story**: a chart library that ships against the
+column-centric API wants `(col, idx) => value` everywhere
+including the key axis. Forcing key-axis callers to drop down to
+the substrate's typed-array layer means the chart library either
+exposes both styles (column-centric value, typed-array key — ugly)
+or it builds its own `.at(i)` wrapper around `.begin[i]` (silly).
+
+**Library-actionable (the headline of M1.2):**
+- **`series.keyColumn().at(i): number | TimeRange | Interval`** —
+  per-row key access matching `col.at(i)`'s shape. Already on
+  PLAN.md as step 8d. This finding promotes 8d from "next code
+  step" to "the close for the M1.2 hover loop."
+- (Optional) `keyColumn().slice(s, e)` for range-slice consistency
+  with `col.slice(s, e)` — same PR.
+
+Sibling note on F3: hover does `bisect(new Time(cursorTime))` once
+per move, which is the same pattern as the per-frame bisect — same
+`Time` allocation friction. Adding `bisectBegin(ts: number)` (the
+F3 carry-forward) would close it for both call sites at once.
+
 ## Code-shape comparison
 
 Three pond-ts calls before — three calls (different ones) after.
@@ -287,23 +352,30 @@ downsampler loop is gone.
 
 In priority order — what to file as PRs against pond-ts:
 
-1. **`series.bisectBegin(ts: number): number`.** Number-in,
-   number-out. F3 unchanged from M1.0; ergonomic, not a perf cliff.
-2. **`col.toFloat64Array(): Float64Array`** (and `toUint8Array()`
+1. **`series.keyColumn().at(i)` + `.slice(s, e)`.** NF4 from the
+   M1.2 hover work. PLAN.md step 8d. Closes the tooltip pattern's
+   key-axis gap: chart adapters that ship against the column-API
+   shouldn't have to drop to `.begin[i]` for per-row timestamp
+   access. M5 (heatmap) needs this too.
+2. **`series.bisectBegin(ts: number): number`.** Number-in,
+   number-out. F3 unchanged from M1.0; ergonomic, not a perf
+   cliff. Hits both the per-frame bisect and the per-hover bisect.
+3. **`col.toFloat64Array(): Float64Array`** (and `toUint8Array()`
    on Boolean, etc.). One method call replaces the storage check.
    Closes F1 / NF3.
-3. **`TimeSeries.fromTrustedColumns(schema, keys, columns)`.**
+4. **`TimeSeries.fromTrustedColumns(schema, keys, columns)`.**
    Producer-side intake skipping the row-validation pass. F5
    unchanged from M1.0.
-4. **Doc: NaN empty-bin convention on `bin`.** NF1. Quick win;
+5. **Doc: NaN empty-bin convention on `bin`.** NF1. Quick win;
    note that Canvas `lineTo` handles NaN natively.
-5. **(Deferred) Pre-allocated bin output buffer.** NF2. Worth
+6. **(Deferred) Pre-allocated bin output buffer.** NF2. Worth
    landing only if a later milestone hits the small-N pattern in a
    real workload.
 
-Item 1 is the only "this is awkward in practice" item; items 2-3
-are real but the chart can work around. Item 4 is a doc-only fix.
-Item 5 is defer-until-friction.
+Item 1 is the headline of the M1.2 work and the natural next step
+the friction note exists to drive. Items 2-3 are real but the chart
+can work around. Item 4 is producer-side. Items 5-6 are
+doc-only / defer-until-friction.
 
 ## Bench numbers (Node-side)
 

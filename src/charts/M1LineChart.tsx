@@ -109,6 +109,40 @@ export function M1LineChart({ n }: { n: N }) {
     end: seriesData.xs[seriesData.xs.length - 1]! + 1,
   }));
 
+  // Hover state — cursor X in CSS pixels, or null when not over the
+  // canvas. Set on pointermove (when not dragging); cleared on
+  // pointerleave. The derived readout below the canvas resolves
+  // cursor X → row index → value at render time, so this state is
+  // cheap to update on every move.
+  const [hoverX, setHoverX] = useState<number | null>(null);
+  const [canvasCssWidth, setCanvasCssWidth] = useState<number>(0);
+
+  // Derived hover values. The chart resolves cursor X to a row index
+  // via the same `bisect` it uses for the visible window — same F3
+  // friction (`new Time(t)`) but only once per hover, not per frame.
+  //
+  // `col.at(idx)` is the column-API access that 8b shipped — first
+  // place M1 actually uses it (the render path uses raw `.values`
+  // for the inline canvas loop). Returns `number | undefined`; the
+  // undefined branch covers cursor-outside-data.
+  //
+  // The key timestamp at the hovered row still pokes at
+  // `keyColumn().begin[idx]` — raw `Float64Array` access on the key
+  // axis. Step 8d (`KeyColumn.at(i)`) is supposed to close this; for
+  // now the chart reaches into the substrate.
+  const hover = useMemo(() => {
+    if (hoverX === null || canvasCssWidth <= 0) return null;
+    const xRange = viewport.end - viewport.start;
+    const t = viewport.start + (hoverX / canvasCssWidth) * xRange;
+    const idx = seriesData.series.bisect(new Time(t));
+    if (idx < 0 || idx >= seriesData.series.length) return null;
+    const value = seriesData.valueCol.at(idx);
+    if (value === undefined) return null;
+    const time = seriesData.xs[idx]; // F-NF4: raw .begin access — see friction note
+    if (time === undefined) return null;
+    return { idx, time, value };
+  }, [hoverX, canvasCssWidth, viewport, seriesData]);
+
   // Reset viewport when N changes.
   useEffect(() => {
     setViewport({
@@ -131,6 +165,7 @@ export function M1LineChart({ n }: { n: N }) {
     const cssHeight = canvas.clientHeight;
     canvas.width = Math.round(cssWidth * dpr);
     canvas.height = Math.round(cssHeight * dpr);
+    setCanvasCssWidth(cssWidth);
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.scale(dpr, dpr);
@@ -243,7 +278,10 @@ export function M1LineChart({ n }: { n: N }) {
     };
   }, [seriesData, viewport, n]);
 
-  // Pan + zoom — unchanged from the spike-accessor version.
+  // Pan + zoom + hover. Pan and zoom unchanged from the spike-
+  // accessor version. Hover added: pointermove (when not dragging)
+  // updates the cursor-X state that drives the readout below the
+  // canvas; pointerleave clears it.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -256,6 +294,8 @@ export function M1LineChart({ n }: { n: N }) {
       canvas?.setPointerCapture(e.pointerId);
     }
     function onMove(e: PointerEvent) {
+      const rect = canvas?.getBoundingClientRect();
+      if (rect) setHoverX(e.clientX - rect.left);
       if (!dragging) return;
       const dx = e.clientX - lastX;
       lastX = e.clientX;
@@ -269,6 +309,9 @@ export function M1LineChart({ n }: { n: N }) {
     function onUp(e: PointerEvent) {
       dragging = false;
       canvas?.releasePointerCapture(e.pointerId);
+    }
+    function onLeave() {
+      setHoverX(null);
     }
     function onWheel(e: WheelEvent) {
       e.preventDefault();
@@ -292,11 +335,13 @@ export function M1LineChart({ n }: { n: N }) {
     canvas.addEventListener('pointerdown', onDown);
     canvas.addEventListener('pointermove', onMove);
     canvas.addEventListener('pointerup', onUp);
+    canvas.addEventListener('pointerleave', onLeave);
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => {
       canvas.removeEventListener('pointerdown', onDown);
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerup', onUp);
+      canvas.removeEventListener('pointerleave', onLeave);
       canvas.removeEventListener('wheel', onWheel);
     };
   }, []);
@@ -325,10 +370,35 @@ export function M1LineChart({ n }: { n: N }) {
           width: '100%',
           height: 500,
           background: '#1c1c1c',
-          cursor: 'grab',
+          cursor: 'crosshair',
           touchAction: 'none',
         }}
       />
+      {/*
+        Hover readout — sits below the canvas (not overlaid) per the
+        plan to keep canvas-rendering out of the column-API test
+        loop. The readout is what M5's tooltip flow needs in shape.
+        Shows the row index, the timestamp at that row, and the
+        value at that row. The timestamp comes from raw
+        `keyColumn().begin[idx]` access; once 8d ships
+        (`KeyColumn.at(i)`) this becomes
+        `series.keyColumn().at(idx)`.
+      */}
+      <div
+        style={{
+          fontFamily: 'monospace',
+          fontSize: 13,
+          background: '#111',
+          color: hover ? '#ffe066' : '#666',
+          padding: '8px 12px',
+          borderRadius: 4,
+          minHeight: 19,
+        }}
+      >
+        {hover
+          ? `idx=${hover.idx.toLocaleString()} | t=${new Date(hover.time).toISOString().slice(11, 23)} | value=${hover.value.toFixed(4)}`
+          : '— hover the chart to see the row at the cursor —'}
+      </div>
     </div>
   );
 }
