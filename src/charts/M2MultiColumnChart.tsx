@@ -118,6 +118,23 @@ export function M2MultiColumnChart({ n }: { n: N }) {
   const [hoverX, setHoverX] = useState<number | null>(null);
   const [canvasCssWidth, setCanvasCssWidth] = useState<number>(0);
 
+  // Pre-allocated per-column { lo, hi } buffers for `col.bin(W,
+  // 'minMax', { out })` (pond-ts 8c follow-up). Without this, each
+  // frame allocates 6 × Float64Array(W) — at 60fps that's ~3MB/s
+  // of allocation churn (W=1024). Pre-allocating once per
+  // `cssWidth` and reusing across frames retires MF2's allocation
+  // component.
+  //
+  // The chart-experiment M2.1 friction-note addendum quantifies the
+  // measured win.
+  const binBuffers = useMemo(() => {
+    if (canvasCssWidth <= 0) return null;
+    return COLUMNS.map(() => ({
+      lo: new Float64Array(canvasCssWidth),
+      hi: new Float64Array(canvasCssWidth),
+    }));
+  }, [canvasCssWidth]);
+
   // Hover readout shows the timestamp + value for EACH column at
   // the hovered row. Three `col.at(idx)` calls — exercises the
   // "per-column read" pattern the chart adapter cares about.
@@ -240,12 +257,13 @@ export function M2MultiColumnChart({ n }: { n: N }) {
             else ctx.lineTo(px, py);
           }
         } else {
-          // Per-pixel min/max via the column-API. Three .bin() calls
-          // per frame (one per column) — six Float64Array
-          // allocations of size cssWidth. Worth flagging in the
-          // friction note as a candidate for the pre-allocated
-          // bin-output buffer carry-forward (NF2 from M1.1).
-          const { lo, hi } = slice.bin(cssWidth, 'minMax');
+          // Per-pixel min/max via the column-API, writing into the
+          // pre-allocated per-column { lo, hi } buffer (no per-
+          // frame allocation). M2.1 carry-forward from M2's MF2.
+          const buf = binBuffers ? binBuffers[c] : undefined;
+          const { lo, hi } = buf
+            ? slice.bin(cssWidth, 'minMax', { out: buf })
+            : slice.bin(cssWidth, 'minMax');
           for (let px = 0; px < cssWidth; px += 1) {
             const hiVal = hi[px]!;
             const loVal = lo[px]!;
@@ -294,7 +312,7 @@ export function M2MultiColumnChart({ n }: { n: N }) {
     return () => {
       cancelled = true;
     };
-  }, [seriesData, viewport, n]);
+  }, [seriesData, viewport, n, binBuffers]);
 
   // Pan + zoom + hover — same shape as M1.
   useEffect(() => {
