@@ -155,6 +155,42 @@ for (const N of sizes) {
     }),
   );
 
+  // M2.2 chart path — derive Y extent from the bin output instead
+  // of calling slice.minMax() separately per column. The bin
+  // already walks every defined value; its lo/hi arrays carry
+  // exactly what Y extent needs. Three O(N) walks replaced with
+  // three O(W) post-passes over Float64Array(1024).
+  results.push(
+    bench(
+      `columnar+out+yfrombins / per-frame full-window / N=${N}`,
+      () => {
+        const startIdx = series.bisect(new Time(xs[0]));
+        const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
+        const slices = cols.map((c) => c.slice(startIdx, endIdx));
+        let yMin = Infinity;
+        let yMax = -Infinity;
+        for (let i = 0; i < slices.length; i += 1) {
+          slices[i].bin(cssWidth, 'minMax', { out: colOutBufs[i] });
+          const lo = colOutBufs[i].lo;
+          const hi = colOutBufs[i].hi;
+          for (let px = 0; px < cssWidth; px += 1) {
+            const loVal = lo[px];
+            const hiVal = hi[px];
+            if (Number.isNaN(loVal)) continue;
+            if (loVal < yMin) yMin = loVal;
+            if (hiVal > yMax) yMax = hiVal;
+          }
+        }
+        if (
+          !Number.isFinite(yMin) ||
+          colOutBufs[0].lo[0] === Number.POSITIVE_INFINITY
+        ) {
+          throw new Error('unreachable');
+        }
+      },
+    ),
+  );
+
   // Lower-bound "fused" path: walk each value buffer once,
   // writing into pre-allocated bin output Float64Arrays. Skips
   // the .slice abstraction, the bin reducer dispatch, and
@@ -249,26 +285,26 @@ for (const N of sizes) {
   const colOut = results.find(
     (r) => r.label === `columnar+out / per-frame full-window / N=${N}`,
   );
+  const yfb = results.find(
+    (r) =>
+      r.label === `columnar+out+yfrombins / per-frame full-window / N=${N}`,
+  );
   const fus = results.find(
     (r) => r.label === `fused / per-frame full-window / N=${N}`,
   );
-  if (!col || !colOut || !fus) continue;
-  const colOverhead = ((col.medianMs / fus.medianMs - 1) * 100).toFixed(0);
-  const colOutOverhead = ((colOut.medianMs / fus.medianMs - 1) * 100).toFixed(
-    0,
-  );
-  const winFromOut = (
-    ((col.medianMs - colOut.medianMs) / col.medianMs) *
+  if (!col || !colOut || !yfb || !fus) continue;
+  const pct = (x) => ((x / fus.medianMs - 1) * 100).toFixed(0);
+  const winYfb = (
+    ((col.medianMs - yfb.medianMs) / col.medianMs) *
     100
   ).toFixed(0);
   console.log(
-    `  N=${N.toString().padStart(8)} | columnar ${col.medianMs
-      .toFixed(3)
-      .padStart(7)} ms (+${colOverhead}%) | columnar+out ${colOut.medianMs
-      .toFixed(3)
-      .padStart(7)} ms (+${colOutOverhead}%) | fused ${fus.medianMs
-      .toFixed(3)
-      .padStart(7)} ms | out vs columnar: ${winFromOut}% faster`,
+    `  N=${N.toString().padStart(8)}` +
+      ` | columnar ${col.medianMs.toFixed(3).padStart(7)} ms (+${pct(col.medianMs)}%)` +
+      ` | +out ${colOut.medianMs.toFixed(3).padStart(7)} ms (+${pct(colOut.medianMs)}%)` +
+      ` | +out+yfrombins ${yfb.medianMs.toFixed(3).padStart(7)} ms (+${pct(yfb.medianMs)}%)` +
+      ` | fused ${fus.medianMs.toFixed(3).padStart(7)} ms` +
+      ` | yfrombins vs columnar: ${winYfb}% faster`,
   );
 }
 console.log('\n1%-zoom (columnar):');

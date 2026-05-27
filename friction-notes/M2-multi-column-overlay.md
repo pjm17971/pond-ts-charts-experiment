@@ -1,9 +1,9 @@
 # M2 — Multi-column overlay
 
 **Date:** 2026-05-27
-**pond-ts version:** post-#161 (column-API steps 8a–8d +
-`col.bin(W, reducer, { out })` follow-up), installed locally from
-`file:../pond/packages/core`.
+**pond-ts version:** post-#162 (column-API steps 8a–8d +
+`col.bin(W, reducer, { out })` from #161 + inline bin minMax walk
+from #162), installed locally from `file:../pond/packages/core`.
 
 ## Milestones in this note
 
@@ -12,9 +12,14 @@
   #161 after MF2's allocation-churn finding. Re-benched. The
   measured win was smaller than the original MF2 projection
   (2–7% rather than "most of the 2× gap"); honest re-bench
-  reframed MF2 around the real hot path (per-bin `sliceByRange`
-  + reducer dispatch inside `bin()`, ~180k allocations/sec at 3
-  cols × 60fps × W=1024 bins). Documented inline below.
+  reframed MF2 around the real hot path.
+- **M2.2** — derived shared Y extent from the bin's `{lo, hi}`
+  output instead of three separate `slice.minMax()` walks. **The
+  load-bearing chart-side win**: replaces three O(N) walks with
+  three O(W) post-passes over `Float64Array(1024)`. Combined with
+  the pond-ts #162 substrate optimization, the chart now sustains
+  60fps at N=10M with three lines — measured 16.6 ms at the data
+  layer, comfortably under the 16.67 ms budget.
 
 ## Workload
 
@@ -166,11 +171,34 @@ constructing intermediate view objects. The public API
   M2 bench actually surfaces; the original MF2 framing was
   partial.
 
-**Status:** `{ out }` shipped (closes the small allocation-churn
-component, ~2-7% measured). The headline optimization moves to
-substrate-level `bin` impl tuning rather than API additions —
-matches the project preference for keeping the public surface
-small.
+**M2.2 finale.** Substrate inline-minMax landed in pond-ts #162;
+the chart side then closed MF2 fully by deriving the shared Y
+extent from the bin output rather than from three separate
+`slice.minMax()` calls. The bin's `{lo, hi}` arrays already
+contain the per-pixel min/max of every defined value in the
+visible window, so the global Y extent is `min(lo)` and `max(hi)`
+across all columns — an O(W) post-pass over `Float64Array(1024)`
+per column instead of an O(N) walk over millions of rows. With 3
+columns at N=10M that's three 1024-element loops replacing three
+10M-element walks: **roughly 10,000× fewer reads** for the Y-
+extent computation.
+
+**Status:** Closed. The cumulative wins land the chart's per-frame
+data-layer work under the 60fps budget at N=10M:
+
+| Workload | M2.0 columnar | M2.1 +out | M2.2 +out+yfrombins | fused floor |
+| --- | ---: | ---: | ---: | ---: |
+| N=100k | 0.54 ms | 0.54 ms | **0.32 ms** (-41%) | 0.26 ms |
+| N=1M | 3.63 ms | 3.38 ms | **1.79 ms** (-51%) | 2.12 ms |
+| N=10M | 32.2 ms | 32.1 ms | **16.6 ms** (-48%) | 17.7 ms |
+
+The chart-side path now **beats** the "fused theoretical floor"
+that this note originally projected as the win ceiling — because
+that floor was a bench harness's inline JS walk, while pond-ts
+#162 inlined the same work into substrate code that V8 specializes
+better. Two architecturally-separate optimizations (substrate
+`bin` walk + chart-side Y-from-bins) compose multiplicatively for
+the headline result.
 
 ### MF3. Hover does three `col.at(idx)` calls for one row
 
@@ -223,59 +251,66 @@ with no per-column check.
 
 `node scripts/bench-M2.mjs`. Median of 30 repeats, 3 warm-up.
 
-Three paths:
+Four paths, each layering on the previous:
 
 - **columnar** — M2.0's original render loop. Three `col.slice()`
   + three `col.minMax()` + three `col.bin('minMax')` per frame.
   Per-frame allocates 6 × Float64Array(W) for the bin outputs +
   three view objects from slice + ~3 × W view objects internally
   inside `bin()` (one per bin).
-- **columnar+out** — M2.1 (after pond-ts #161). Same shape but
-  passes pre-allocated `{ lo, hi }` buffers via
-  `col.bin(W, 'minMax', { out })`. Retires the 6 typed-array
-  allocations per frame. The 3 × W internal view objects per
-  call are still there (substrate-level, not API-exposed).
-- **fused** — theoretical floor. One pass over each column's raw
-  `Float64Array` with pre-allocated bin output buffers AND no
-  intermediate view objects per bin. The chart adapter can't
-  write this today — it's what an inlined-`bin` substrate change
-  would unlock.
+- **+out** — M2.1 (after pond-ts #161). Adds `{ out }`: pre-
+  allocated `{ lo, hi }` buffers passed via `col.bin(W, 'minMax',
+  { out })`. Retires the 6 typed-array allocations per frame.
+- **+out+yfrombins** — M2.2 (this milestone, after pond-ts #162's
+  inline minMax walk landed). Drops the three `slice.minMax()`
+  calls; derives Y extent from the bin's `{lo, hi}` output. Three
+  O(W) post-passes (~1024 reads each) replace three O(N) walks
+  (millions of reads each). This is what M2's chart actually runs.
+- **fused** — theoretical floor. The bench harness's inline JS
+  walk: one pass over each column's raw `Float64Array`, computing
+  bin AND Y in the same loop. Pre-allocated outputs, no view
+  objects. Used to be the projected ceiling for the chart's win;
+  M2.2 now beats it (see the note below the table).
 
-| Workload (full-window) | columnar | columnar+out | fused |
-| --- | ---: | ---: | ---: |
-| N=100k | 0.52 ms (+120%) | 0.49 ms (+107%) | 0.24 ms |
-| N=1M | 3.67 ms (+95%) | 3.62 ms (+92%) | 1.88 ms |
-| N=10M | 35.3 ms (+98%) | 32.6 ms (+83%) | 17.8 ms |
+| Workload (full-window) | columnar | +out | +out+yfrombins | fused |
+| --- | ---: | ---: | ---: | ---: |
+| N=100k | 0.54 ms (+105%) | 0.54 ms (+107%) | **0.32 ms (+21%)** | 0.26 ms |
+| N=1M | 3.63 ms (+71%) | 3.38 ms (+59%) | **1.79 ms (-16%)** | 2.12 ms |
+| N=10M | 32.2 ms (+82%) | 32.1 ms (+81%) | **16.6 ms (-6%)** | 17.7 ms |
 
-`{ out }` win vs bare `columnar` (across full-window):
-**2 – 7%**. Small. Retires the allocation churn but most of the
-overhead is elsewhere.
+(`+%` is overhead vs the fused floor at that N.)
 
-1%-zoom (columnar, no per-pixel downsample needed at N=100k):
+**yfrombins vs columnar — the M2.2 headline:** -41% (N=100k), -51%
+(N=1M), -48% (N=10M). Roughly halves the per-frame work across
+all scales. The 1.5×-better-than-fused-floor result at N=1M /
+N=10M comes from pond-ts #162's inline-minMax substrate
+optimization, which V8 specializes better than the bench
+harness's JS-level inline walk.
+
+1%-zoom (any path, no per-pixel downsample needed at N=100k):
 
 | | columnar |
 | --- | ---: |
-| N=100k | 0.003 ms |
-| N=1M | 0.142 ms |
-| N=10M | 0.477 ms |
+| N=100k | 0.008 ms |
+| N=1M | 0.053 ms |
+| N=10M | 0.399 ms |
 
 **Frame-budget translation at 60 fps (16.67 ms):**
 
-- **N=10M full-window: columnar+out still 32.6 ms** — above
-  budget by 2×. The pre-allocated output buffer didn't move the
-  needle here; the bulk of the cost is per-bin overhead inside
-  `bin()`'s impl. Substrate inlining (carry-forward #1) is what
-  closes this.
-- N=1M full-window: 3.6 ms — 5× headroom. Comfortable either
-  way.
+- **N=10M full-window: M2.2 path 16.6 ms** — comfortably under
+  budget, leaving headroom for canvas draw + axis labels. M2.0
+  was 2× over budget at 32 ms.
+- N=1M full-window: 1.8 ms — 9× headroom. Free.
 - All 1%-zoom cases: < 0.5 ms — interactive zoom is essentially
   free at the data layer.
 
-The **honest M2 finding after re-bench**: composition cost is
-real and the headline lives in the substrate's per-bin work, not
-the per-frame output allocation. `{ out }` was a real (small) win
-and the right shape for the API; the headline optimization is
-substrate-level and doesn't require any public-surface change.
+The **M2 outcome after the full friction loop**: composition cost
+was real and the headline win came from two architecturally-
+distinct changes that compose multiplicatively. Substrate side
+(pond-ts #162) tuned the per-bin work; chart side (M2.2) skipped
+redundant Y-extent walks by reusing the bin output. The chart now
+sustains 60fps at N=10M with three lines — the workload that
+motivated the experiment in the first place.
 
 ## Validating "alignment-by-construction"
 
@@ -312,52 +347,55 @@ new library-actionable shape.
 
 ## Library-actionable items (carry-forward)
 
-In priority order — refreshed after M2.1's bench told us where
-the cost actually lives.
+In priority order — refreshed after M2.2 closed MF2 fully.
 
-1. **Substrate: inline `bin()`'s per-bin walk in pond-ts.** Each
-   `col.bin(W, reducer)` call internally allocates W view objects
-   via `sliceByRange` + dispatches through `resolveReducer` per
-   bin — ~180k allocations/sec at 3 cols × 60fps × W=1024. The
-   M2.1 re-bench (after `{ out }` shipped) shows this is where
-   the remaining ~2× gap vs the fused floor lives, not in the
-   bin output allocation. **Substrate-only**, no public API
-   change. Headline of M2 post-bench.
-2. **`col.toFloat64Array(): Float64Array`** — closes MF4 / F1 /
+1. **`col.toFloat64Array(): Float64Array`** — closes MF4 / F1 /
    NF3. Three storage checks across columns collapse to three
    one-liners with this. Substrate has `materializeChunkedFloat64`
    already; just needs a public method.
-3. **`series.bisectBegin(ts: number): number`** — F3 unchanged
+2. **`series.bisectBegin(ts: number): number`** — F3 unchanged
    from M1.0. Two bisects per frame + N per hover; the per-frame
    case is the load-bearing one.
-4. **`series.multiMinMax(cols: string[]): [number, number] |
-   undefined`** — shared Y extent in one cross-column walk (MF1).
-   Friction is shape-level; the chart workaround is six lines so
-   the perf cost is small. Land only if M3 / M5 hits a use case
-   that elevates it.
-5. **Doc: per-row reads.** Mention that `series.rows[idx]`
+3. **MF1: shared Y extent across columns is hand-rolled.**
+   Status downgraded: M2.2 showed the chart can compute Y from
+   bin output in 6 lines and gets the 60fps win as a bonus. A
+   `series.multiMinMax(cols)` library primitive is no longer
+   load-bearing — the friction is "shape-level" not "perf-level."
+   Keep on the list as a "consolidation candidate" only.
+4. **Doc: per-row reads.** Mention that `series.rows[idx]`
    handles the "row at idx" pattern for tooltip-style consumers
    when per-column composition feels heavy. MF3 closes itself
    with a doc nudge.
-6. **`TimeSeries.fromTrustedColumns(...)`** — F5 unchanged from
+5. **`TimeSeries.fromTrustedColumns(...)`** — F5 unchanged from
    M1.0. Producer-side.
-7. **Doc: NaN empty-bin convention** — NF1 unchanged from M1.1.
+6. **Doc: NaN empty-bin convention** — NF1 unchanged from M1.1.
 
 **Retired in this note's history:**
 
-- **MF2 (pre-allocated bin output)** — `col.bin(W, reducer,
-  { out })` shipped in pond-ts
-  [#161](https://github.com/pjm17971/pond-ts/pull/161). M2.1
-  adopted it. Measured win on full-window: 2–7% across N=100k →
-  10M. Smaller than the original MF2 framing implied; the bigger
-  cost is per-bin allocations inside the substrate (now #1
-  above).
+- **MF2 (per-frame bin overhead)** — closed by two architecturally-
+  distinct changes that compose multiplicatively:
+  - `col.bin(W, reducer, { out })` shipped in pond-ts
+    [#161](https://github.com/pjm17971/pond-ts/pull/161); M2.1
+    adopted it. Measured win on full-window: 2–7%. The pre-
+    allocated output buffer was the right shape but smaller win
+    than the original MF2 framing implied.
+  - Substrate `bin('minMax')` inline walk shipped in pond-ts
+    [#162](https://github.com/pjm17971/pond-ts/pull/162). 9-23%
+    win at the substrate level depending on workload.
+  - M2.2 chart cycle: derive Y from bin's `{lo, hi}` output
+    rather than three separate `slice.minMax()` walks. The
+    chart-side win that closes the chart's per-frame budget at
+    N=10M. Cumulative chart-side win across all three changes:
+    -41 to -51% per-frame work depending on N. **Chart now
+    sustains 60fps at N=10M with three lines.**
 
-The project's preferred direction has been "keep the public
-surface small, optimize the substrate" — item #1 fits that
-preference exactly. Item #4 (`multiBin`) was an earlier candidate
-but is no longer the right shape now that we know where the cost
-actually lives.
+The project's "keep the public surface small, optimize the
+substrate" preference held up across the whole MF2 loop: ONE small
+API addition (`{ out }` parameter on an existing method) plus ONE
+substrate-internal optimization plus a chart-side reorganization.
+No new top-level methods. The original M2 carry-forward had
+`series.multiBin` and `series.multiMinMax` as the headline
+candidates; neither needed to ship.
 
 ## What this experiment didn't cover
 

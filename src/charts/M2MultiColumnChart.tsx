@@ -208,22 +208,56 @@ export function M2MultiColumnChart({ n }: { n: N }) {
         c.slice(startIdx, endIdx),
       );
 
-      // Compute the SHARED Y extent — across all three columns'
-      // visible windows. M2-specific friction: pond-ts gives us
-      // `col.minMax()` per column but no `multiMinMax([a, b, c])`.
-      // The chart adapter assembles its own shared extent.
+      // ─── Pass 1: compute per-column data and global Y extent ───
       //
-      // Three minMax() calls + an O(3) reduction is fine perf-wise,
-      // but the SHAPE of the friction is interesting: the chart
-      // wants a single shared scale, the library gives it per-
-      // column reductions. Captured in M2 friction note.
+      // M2.2 — derive Y from the bin output instead of calling
+      // `slice.minMax()` separately. In the binned-render path the
+      // bin already touches every defined value in the visible
+      // window; the {lo, hi} arrays contain everything Y extent
+      // needs (global yMin = min of all bin lows; global yMax =
+      // max of all bin highs). That replaces three O(N) walks
+      // with three O(W) post-passes — 1000× fewer reads at
+      // N=1M, W=1024.
+      //
+      // In the 1:1-render path bin is skipped; we walk raw values
+      // once for Y here. Pass 2 then walks them a second time for
+      // canvas draw. The 1:1 path's visible window is ≤ cssWidth
+      // (≈1024) rows so the double-walk is microseconds — not
+      // worth deduplicating.
       let yMin = Infinity;
       let yMax = -Infinity;
-      for (const slice of slices) {
-        const extent = slice.minMax();
-        if (!extent) continue;
-        if (extent[0] < yMin) yMin = extent[0];
-        if (extent[1] > yMax) yMax = extent[1];
+      const binned = visible > cssWidth;
+      if (binned) {
+        for (let c = 0; c < COLUMNS.length; c += 1) {
+          const slice = slices[c]!;
+          const buf = binBuffers ? binBuffers[c] : undefined;
+          // Pre-allocated buffer when available (the common case
+          // after canvasCssWidth memoization); fresh allocation as
+          // a fallback during the first frame before binBuffers is
+          // ready.
+          const { lo, hi } = buf
+            ? slice.bin(cssWidth, 'minMax', { out: buf })
+            : slice.bin(cssWidth, 'minMax');
+          for (let px = 0; px < cssWidth; px += 1) {
+            const loVal = lo[px]!;
+            const hiVal = hi[px]!;
+            // bin writes NaN to empty bins; skip those in the Y
+            // extent calculation so Math.min/Math.max see only
+            // real samples.
+            if (Number.isNaN(loVal)) continue;
+            if (loVal < yMin) yMin = loVal;
+            if (hiVal > yMax) yMax = hiVal;
+          }
+        }
+      } else {
+        for (let c = 0; c < COLUMNS.length; c += 1) {
+          const ys = slices[c]!.values;
+          for (let i = 0; i < ys.length; i += 1) {
+            const v = ys[i]!;
+            if (v < yMin) yMin = v;
+            if (v > yMax) yMax = v;
+          }
+        }
       }
       if (!Number.isFinite(yMin)) {
         recordFrame();
@@ -232,9 +266,12 @@ export function M2MultiColumnChart({ n }: { n: N }) {
       const yRange = yMax - yMin || 1;
       const xRange = viewport.end - viewport.start;
 
-      // Per-column render. Each line gets its own stroke pass; the
-      // visible-row count drives 1:1 vs per-pixel min/max
-      // downsampling identically for every column.
+      // ─── Pass 2: render each line ──────────────────────────────
+      //
+      // Each line gets its own stroke pass; the binned path reads
+      // back the pre-allocated buffers populated during pass 1
+      // (no second bin call). The 1:1 path re-reads slice.values
+      // — see pass 1's note on why the double-read is fine there.
       for (let c = 0; c < COLUMNS.length; c += 1) {
         const slice = slices[c]!;
         const cfg = COLUMNS[c]!;
@@ -243,27 +280,34 @@ export function M2MultiColumnChart({ n }: { n: N }) {
         ctx.strokeStyle = cfg.color;
         ctx.lineWidth = 1;
 
-        if (visible <= cssWidth) {
-          // 1:1 — no downsampling. Raw .values from the packed
-          // column slice (storage was checked at extraction time).
+        if (binned) {
+          // Binned path — use the buffers populated during pass 1.
+          const buf = binBuffers ? binBuffers[c]! : undefined;
+          if (!buf) {
+            // First frame fallback: re-bin into a fresh allocation
+            // (matches the pre-M2.2 behavior when binBuffers is
+            // still null on initial canvas mount).
+            const fresh = slice.bin(cssWidth, 'minMax');
+            renderBinned(fresh.lo, fresh.hi);
+          } else {
+            renderBinned(buf.lo, buf.hi);
+          }
+        } else {
+          // 1:1 path — raw values from the packed column slice.
           // For chunked support, M3 will need a different path.
           const xs = seriesData.keys.begin.subarray(startIdx, endIdx);
           const ys = slice.values;
           for (let i = 0; i < xs.length; i += 1) {
             const px = ((xs[i]! - viewport.start) / xRange) * cssWidth;
-            const py =
-              cssHeight - ((ys[i]! - yMin) / yRange) * cssHeight;
+            const py = cssHeight - ((ys[i]! - yMin) / yRange) * cssHeight;
             if (i === 0) ctx.moveTo(px, py);
             else ctx.lineTo(px, py);
           }
-        } else {
-          // Per-pixel min/max via the column-API, writing into the
-          // pre-allocated per-column { lo, hi } buffer (no per-
-          // frame allocation). M2.1 carry-forward from M2's MF2.
-          const buf = binBuffers ? binBuffers[c] : undefined;
-          const { lo, hi } = buf
-            ? slice.bin(cssWidth, 'minMax', { out: buf })
-            : slice.bin(cssWidth, 'minMax');
+        }
+        ctx.stroke();
+
+        function renderBinned(lo: Float64Array, hi: Float64Array) {
+          if (!ctx) return;
           for (let px = 0; px < cssWidth; px += 1) {
             const hiVal = hi[px]!;
             const loVal = lo[px]!;
@@ -277,7 +321,6 @@ export function M2MultiColumnChart({ n }: { n: N }) {
             ctx.lineTo(px, pyLo);
           }
         }
-        ctx.stroke();
       }
 
       recordFrame();
