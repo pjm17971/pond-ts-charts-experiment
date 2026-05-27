@@ -97,9 +97,15 @@ export function M1LineChart({ n }: { n: N }) {
         `M1 expected a packed Float64 column; got storage=${valueCol.storage}`,
       );
     }
-    const xs: Float64Array = series.keyColumn().begin;
+    // Cache the schema-narrowed key column (pond-ts step 8d).
+    // `keyColumn()` is a field access on the underlying store, so
+    // calling it once and caching is the same cost as inlining;
+    // doing it here lets the hover useMemo reach for the column
+    // API (`keys.at(idx)`) without re-resolving.
+    const keys = series.keyColumn();
+    const xs: Float64Array = keys.begin;
     const ys: Float64Array = valueCol.values;
-    return { series, valueCol, xs, ys, buildMs };
+    return { series, valueCol, keys, xs, ys, buildMs };
   }, [n]);
 
   // Viewport state. `start` / `end` are inclusive begin / exclusive end
@@ -121,15 +127,19 @@ export function M1LineChart({ n }: { n: N }) {
   // via the same `bisect` it uses for the visible window — same F3
   // friction (`new Time(t)`) but only once per hover, not per frame.
   //
-  // `col.at(idx)` is the column-API access that 8b shipped — first
-  // place M1 actually uses it (the render path uses raw `.values`
-  // for the inline canvas loop). Returns `number | undefined`; the
-  // undefined branch covers cursor-outside-data.
+  // Both axes use the column-API now:
+  //   - `valueCol.at(idx)` — pond-ts step 8b, returns `number |
+  //     undefined`.
+  //   - `keys.at(idx)` — pond-ts step 8d, returns `number |
+  //     undefined` (for a `time`-keyed schema, the schema-narrowed
+  //     KeyColumn is `TimeKeyColumn`, so `at(i)` returns the raw
+  //     timestamp).
   //
-  // The key timestamp at the hovered row still pokes at
-  // `keyColumn().begin[idx]` — raw `Float64Array` access on the key
-  // axis. Step 8d (`KeyColumn.at(i)`) is supposed to close this; for
-  // now the chart reaches into the substrate.
+  // M1.2 (commit 5603173) reached into the substrate's raw
+  // `keyColumn().begin[idx]` for the key axis because 8d hadn't
+  // shipped. NF4 in `M1-column-api-adoption.md` flagged this as
+  // the load-bearing carry-forward; 8d (PR pond-ts#159) closed it,
+  // and this M1.3 commit retires NF4 by adopting the new method.
   const hover = useMemo(() => {
     if (hoverX === null || canvasCssWidth <= 0) return null;
     const xRange = viewport.end - viewport.start;
@@ -138,7 +148,7 @@ export function M1LineChart({ n }: { n: N }) {
     if (idx < 0 || idx >= seriesData.series.length) return null;
     const value = seriesData.valueCol.at(idx);
     if (value === undefined) return null;
-    const time = seriesData.xs[idx]; // F-NF4: raw .begin access — see friction note
+    const time = seriesData.keys.at(idx);
     if (time === undefined) return null;
     return { idx, time, value };
   }, [hoverX, canvasCssWidth, viewport, seriesData]);
