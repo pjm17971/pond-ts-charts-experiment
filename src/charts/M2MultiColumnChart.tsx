@@ -118,22 +118,11 @@ export function M2MultiColumnChart({ n }: { n: N }) {
   const [hoverX, setHoverX] = useState<number | null>(null);
   const [canvasCssWidth, setCanvasCssWidth] = useState<number>(0);
 
-  // Pre-allocated per-column { lo, hi } buffers for `col.bin(W,
-  // 'minMax', { out })` (pond-ts 8c follow-up). Without this, each
-  // frame allocates 6 × Float64Array(W) — at 60fps that's ~3MB/s
-  // of allocation churn (W=1024). Pre-allocating once per
-  // `cssWidth` and reusing across frames retires MF2's allocation
-  // component.
-  //
-  // The chart-experiment M2.1 friction-note addendum quantifies the
-  // measured win.
-  const binBuffers = useMemo(() => {
-    if (canvasCssWidth <= 0) return null;
-    return COLUMNS.map(() => ({
-      lo: new Float64Array(canvasCssWidth),
-      hi: new Float64Array(canvasCssWidth),
-    }));
-  }, [canvasCssWidth]);
+  // (M2.1's pre-allocated `binBuffers` was removed after M2.2's
+  // bench showed it contributed zero measurable win on top of
+  // yfrombins — the pond-ts `col.bin(W, reducer, { out })` option
+  // it consumed was reverted along with it. See M2 friction
+  // note's MF2 history.)
 
   // Hover readout shows the timestamp + value for EACH column at
   // the hovered row. Three `col.at(idx)` calls — exercises the
@@ -227,17 +216,16 @@ export function M2MultiColumnChart({ n }: { n: N }) {
       let yMin = Infinity;
       let yMax = -Infinity;
       const binned = visible > cssWidth;
+      // Per-column bin output — stashed for pass 2's render. Fresh
+      // allocation per call; the M2.1-era pre-allocated buffer
+      // approach didn't earn its keep once yfrombins shipped.
+      const binOutputs: Array<{ lo: Float64Array; hi: Float64Array }> = [];
       if (binned) {
         for (let c = 0; c < COLUMNS.length; c += 1) {
           const slice = slices[c]!;
-          const buf = binBuffers ? binBuffers[c] : undefined;
-          // Pre-allocated buffer when available (the common case
-          // after canvasCssWidth memoization); fresh allocation as
-          // a fallback during the first frame before binBuffers is
-          // ready.
-          const { lo, hi } = buf
-            ? slice.bin(cssWidth, 'minMax', { out: buf })
-            : slice.bin(cssWidth, 'minMax');
+          const out = slice.bin(cssWidth, 'minMax');
+          binOutputs.push(out);
+          const { lo, hi } = out;
           for (let px = 0; px < cssWidth; px += 1) {
             const loVal = lo[px]!;
             const hiVal = hi[px]!;
@@ -281,17 +269,10 @@ export function M2MultiColumnChart({ n }: { n: N }) {
         ctx.lineWidth = 1;
 
         if (binned) {
-          // Binned path — use the buffers populated during pass 1.
-          const buf = binBuffers ? binBuffers[c]! : undefined;
-          if (!buf) {
-            // First frame fallback: re-bin into a fresh allocation
-            // (matches the pre-M2.2 behavior when binBuffers is
-            // still null on initial canvas mount).
-            const fresh = slice.bin(cssWidth, 'minMax');
-            renderBinned(fresh.lo, fresh.hi);
-          } else {
-            renderBinned(buf.lo, buf.hi);
-          }
+          // Binned path — read back the bin output stashed during
+          // pass 1. No second bin call.
+          const out = binOutputs[c]!;
+          renderBinned(out.lo, out.hi);
         } else {
           // 1:1 path — raw values from the packed column slice.
           // For chunked support, M3 will need a different path.
@@ -355,7 +336,7 @@ export function M2MultiColumnChart({ n }: { n: N }) {
     return () => {
       cancelled = true;
     };
-  }, [seriesData, viewport, n, binBuffers]);
+  }, [seriesData, viewport, n]);
 
   // Pan + zoom + hover — same shape as M1.
   useEffect(() => {

@@ -3,31 +3,27 @@
 //
 // Compares three shapes:
 //
-//   "columnar"     — per-frame work shipped by M2's original
-//                    render loop: bisect, three col.slice(), three
-//                    col.minMax(), three col.bin(W, 'minMax') —
-//                    allocates 6 × Float64Array(W) per frame.
+//   "columnar"     — M2.0's original render loop: bisect, three
+//                    col.slice(), three col.minMax() (for shared
+//                    Y), three col.bin(W, 'minMax') per frame.
 //
-//   "columnar+out" — same, but passes pre-allocated { lo, hi }
-//                    buffers via `col.bin(W, 'minMax', { out })`.
-//                    The pond-ts library change (PR #161) that
-//                    closed M1 NF2 / M2 MF2's allocation
-//                    component. This is what M2.1 of the chart
-//                    actually does.
+//   "columnar+yfrombins"
+//                  — M2.2's render loop: drop the three
+//                    col.minMax() walks; derive shared Y extent
+//                    from the bin output (O(W) post-pass over
+//                    {lo, hi}). This is what M2's chart actually
+//                    runs.
 //
 //   "fused"        — theoretical floor: skip the slice abstraction
-//                    AND the bin reducer dispatch AND the per-
-//                    frame allocation. One tight loop over the
-//                    three raw Float64Arrays, writing into pre-
-//                    allocated buffers. Not something the chart
-//                    adapter can write today (would need a
-//                    `series.multiBin(...)` primitive).
+//                    AND compute bin + Y in one tight loop over
+//                    each raw Float64Array. Used as a sanity-
+//                    check ceiling on the chart-side wins.
 //
-// Pre-bin-out result (M2.0):
-//   N=10M full-window: columnar 33.5ms, fused 18.0ms → +86%
-// The columnar+out path closes the allocation-driven part of
-// that gap. The remaining gap is the three-walk vs one-walk
-// cost, which is what a future multiBin would close.
+// History note: the M2.1 milestone tried pond-ts's `col.bin(W,
+// reducer, { out })` optional output buffer. Once yfrombins
+// (M2.2) was in place, the { out } variant contributed zero
+// measurable win and was reverted upstream. See M2 friction
+// note's MF2 history.
 
 import { performance } from 'node:perf_hooks';
 import { Time, TimeSeries } from 'pond-ts';
@@ -122,73 +118,32 @@ for (const N of sizes) {
     }),
   );
 
-  // Columnar with pre-allocated { lo, hi } buffers — the new
-  // pond-ts 8c follow-up option (PR #161). M2.1 of the chart uses
-  // this. Same shape as the bare columnar path otherwise.
-  const colOutBufs = [
-    { lo: new Float64Array(cssWidth), hi: new Float64Array(cssWidth) },
-    { lo: new Float64Array(cssWidth), hi: new Float64Array(cssWidth) },
-    { lo: new Float64Array(cssWidth), hi: new Float64Array(cssWidth) },
-  ];
-  results.push(
-    bench(`columnar+out / per-frame full-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(xs[0]));
-      const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
-      const slices = cols.map((c) => c.slice(startIdx, endIdx));
-      let yMin = Infinity;
-      let yMax = -Infinity;
-      for (const s of slices) {
-        const e = s.minMax();
-        if (!e) continue;
-        if (e[0] < yMin) yMin = e[0];
-        if (e[1] > yMax) yMax = e[1];
-      }
-      for (let i = 0; i < slices.length; i += 1) {
-        slices[i].bin(cssWidth, 'minMax', { out: colOutBufs[i] });
-      }
-      if (
-        !Number.isFinite(yMin) ||
-        colOutBufs[0].lo[0] === Number.POSITIVE_INFINITY
-      ) {
-        throw new Error('unreachable');
-      }
-    }),
-  );
-
   // M2.2 chart path — derive Y extent from the bin output instead
   // of calling slice.minMax() separately per column. The bin
   // already walks every defined value; its lo/hi arrays carry
   // exactly what Y extent needs. Three O(N) walks replaced with
   // three O(W) post-passes over Float64Array(1024).
   results.push(
-    bench(
-      `columnar+out+yfrombins / per-frame full-window / N=${N}`,
-      () => {
-        const startIdx = series.bisect(new Time(xs[0]));
-        const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
-        const slices = cols.map((c) => c.slice(startIdx, endIdx));
-        let yMin = Infinity;
-        let yMax = -Infinity;
-        for (let i = 0; i < slices.length; i += 1) {
-          slices[i].bin(cssWidth, 'minMax', { out: colOutBufs[i] });
-          const lo = colOutBufs[i].lo;
-          const hi = colOutBufs[i].hi;
-          for (let px = 0; px < cssWidth; px += 1) {
-            const loVal = lo[px];
-            const hiVal = hi[px];
-            if (Number.isNaN(loVal)) continue;
-            if (loVal < yMin) yMin = loVal;
-            if (hiVal > yMax) yMax = hiVal;
-          }
+    bench(`columnar+yfrombins / per-frame full-window / N=${N}`, () => {
+      const startIdx = series.bisect(new Time(xs[0]));
+      const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
+      const slices = cols.map((c) => c.slice(startIdx, endIdx));
+      let yMin = Infinity;
+      let yMax = -Infinity;
+      for (let i = 0; i < slices.length; i += 1) {
+        const { lo, hi } = slices[i].bin(cssWidth, 'minMax');
+        for (let px = 0; px < cssWidth; px += 1) {
+          const loVal = lo[px];
+          const hiVal = hi[px];
+          if (Number.isNaN(loVal)) continue;
+          if (loVal < yMin) yMin = loVal;
+          if (hiVal > yMax) yMax = hiVal;
         }
-        if (
-          !Number.isFinite(yMin) ||
-          colOutBufs[0].lo[0] === Number.POSITIVE_INFINITY
-        ) {
-          throw new Error('unreachable');
-        }
-      },
-    ),
+      }
+      if (!Number.isFinite(yMin)) {
+        throw new Error('unreachable');
+      }
+    }),
   );
 
   // Lower-bound "fused" path: walk each value buffer once,
@@ -282,17 +237,13 @@ for (const N of sizes) {
   const col = results.find(
     (r) => r.label === `columnar / per-frame full-window / N=${N}`,
   );
-  const colOut = results.find(
-    (r) => r.label === `columnar+out / per-frame full-window / N=${N}`,
-  );
   const yfb = results.find(
-    (r) =>
-      r.label === `columnar+out+yfrombins / per-frame full-window / N=${N}`,
+    (r) => r.label === `columnar+yfrombins / per-frame full-window / N=${N}`,
   );
   const fus = results.find(
     (r) => r.label === `fused / per-frame full-window / N=${N}`,
   );
-  if (!col || !colOut || !yfb || !fus) continue;
+  if (!col || !yfb || !fus) continue;
   const pct = (x) => ((x / fus.medianMs - 1) * 100).toFixed(0);
   const winYfb = (
     ((col.medianMs - yfb.medianMs) / col.medianMs) *
@@ -301,8 +252,7 @@ for (const N of sizes) {
   console.log(
     `  N=${N.toString().padStart(8)}` +
       ` | columnar ${col.medianMs.toFixed(3).padStart(7)} ms (+${pct(col.medianMs)}%)` +
-      ` | +out ${colOut.medianMs.toFixed(3).padStart(7)} ms (+${pct(colOut.medianMs)}%)` +
-      ` | +out+yfrombins ${yfb.medianMs.toFixed(3).padStart(7)} ms (+${pct(yfb.medianMs)}%)` +
+      ` | +yfrombins ${yfb.medianMs.toFixed(3).padStart(7)} ms (+${pct(yfb.medianMs)}%)` +
       ` | fused ${fus.medianMs.toFixed(3).padStart(7)} ms` +
       ` | yfrombins vs columnar: ${winYfb}% faster`,
   );
