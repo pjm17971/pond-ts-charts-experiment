@@ -1,22 +1,40 @@
 // M1 — single-column line chart at scale (100k → 1M → 10M).
 //
-// What this validates from pond-ts/docs/notes/chart-spike-friction.md:
-//   - The substrate is reachable: `series.column('value').values`
-//     returns a `Float64Array` ready for canvas draw.
-//   - Range slicing for zoom (friction item #3): use `series.bisect()`
-//     to find visible-window row indices, then `subarray()` for a
-//     zero-copy view.
-//   - The "kind/storage dispatch boilerplate" (friction item #1) gets
-//     written by a real consumer here, in real code we can quote in
-//     the friction note.
+// Updated 2026-05-27: rewritten to use pond-ts's column-centric
+// public API (Phase 4.7 step 8a/8b/8c). Diff vs the spike-accessor
+// version (git log b814cbb) is the body of friction-notes/
+// M1-column-api-adoption.md.
 //
-// Architecture:
-//   - One <canvas> at a fixed pixel size (devicePixelRatio-aware).
-//   - Series + extracted typed arrays cached via `useMemo`; only
-//     rebuilt when N changes.
-//   - Viewport state (x-range) drives the draw. Pan + zoom mutate
-//     the viewport; a `requestAnimationFrame` loop re-draws when
-//     `needsRedraw` flips.
+// What this version exercises:
+//   - `series.column('value')` returns a schema-narrowed
+//     `Float64Column | ChunkedFloat64Column` (no `| undefined`).
+//     No `kind !== 'number'` check needed at the call site.
+//   - The chart's per-pixel min/max downsampler collapses to
+//     `col.bin(cssWidth, 'minMax')` — one method call returning
+//     `{ lo, hi }` Float64Arrays of width `cssWidth`.
+//   - Y-extent for axis scaling collapses to `col.minMax()`.
+//   - `col.slice(startIdx, endIdx)` produces a zero-copy view
+//     that's itself a Column — `.bin()` / `.minMax()` chain off it
+//     cleanly.
+//
+// What still touches raw substrate:
+//   - The 1:1 fast path (visible ≤ cssWidth) wants raw `Float64Array`
+//     values for inline moveTo/lineTo. `col.scan(fn)` would work
+//     storage-agnostically but the closure overhead is measurable
+//     at 1M+ rows. M1's data is always packed (built from rows)
+//     so we keep a single `storage === 'packed'` assertion at
+//     extraction and use raw `.values` from there.
+//   - `series.keyColumn().begin` for x-axis projection — raw
+//     `Float64Array` is exactly what canvas wants. Step 8d
+//     (`KeyColumn.slice`) will tidy this further; not needed yet.
+//   - `series.bisect(new Time(ts))` for window resolution —
+//     still a `KeyLike` argument. Friction item F3 (number-in,
+//     number-out `bisectBegin`) is still outstanding.
+//
+// Architecture is unchanged:
+//   - One <canvas> at fixed pixel size (devicePixelRatio-aware).
+//   - Series cached via `useMemo`; only rebuilt when N changes.
+//   - Viewport state drives the draw. Pan + zoom mutate viewport.
 //   - Per-frame timing recorded for the stats overlay.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
@@ -30,7 +48,7 @@ const SCHEMA = [
 ] as const;
 
 function buildSeries(n: number): TimeSeries<typeof SCHEMA> {
-  // Build via the same row-array path a real consumer would —
+  // Build via the row-array path a real consumer would use —
   // post-2c column-native intake handles this efficiently.
   const rows = new Array(n);
   for (let i = 0; i < n; i += 1) {
@@ -54,26 +72,34 @@ export function M1LineChart({ n }: { n: N }) {
     totalRows: 0,
   });
 
-  // Series + extracted typed arrays. `useMemo` recomputes only when N
-  // changes. The kind/storage dispatch (friction item #1) shows up here:
-  // the chart code has to verify the schema's value column is the
-  // expected packed Float64 shape before reaching `.values`.
+  // Series + column + key-column raw view. `useMemo` recomputes only
+  // when N changes.
+  //
+  // `series.column('value')` is now schema-narrowed:
+  //   - schema declares `value` as `kind: 'number'`, so the return
+  //     type is `Float64Column | ChunkedFloat64Column`.
+  //   - no `| undefined` (RFC §7.2 — typos and key-column names
+  //     fail to compile rather than returning undefined at runtime).
+  //
+  // Only the storage check remains — and only because the 1:1 path
+  // wants raw `.values` for inline canvas draw. For series built
+  // from rows this is always 'packed'; chunked surfaces only after
+  // `concatSorted` and is M3's concern.
   const seriesData = useMemo(() => {
     const buildStart = performance.now();
     const series = buildSeries(n);
     const buildMs = performance.now() - buildStart;
 
     const valueCol = series.column('value');
-    if (!valueCol || valueCol.kind !== 'number' || valueCol.storage !== 'packed') {
-      // M1 only handles packed Float64. A real chart would `materialize`
-      // chunked or surface a fallback path. Captured as friction item #4.
+    if (valueCol.storage !== 'packed') {
+      // M1's data is always packed. Chunked → M3.
       throw new Error(
-        `M1 expected a packed Float64 'value' column; got kind=${valueCol?.kind} storage=${valueCol?.storage}`,
+        `M1 expected a packed Float64 column; got storage=${valueCol.storage}`,
       );
     }
     const xs: Float64Array = series.keyColumn().begin;
     const ys: Float64Array = valueCol.values;
-    return { series, xs, ys, buildMs };
+    return { series, valueCol, xs, ys, buildMs };
   }, [n]);
 
   // Viewport state. `start` / `end` are inclusive begin / exclusive end
@@ -92,7 +118,7 @@ export function M1LineChart({ n }: { n: N }) {
     setStats((s) => ({ ...s, buildMs: seriesData.buildMs, totalRows: n }));
   }, [seriesData, n]);
 
-  // Render loop. Re-draws on viewport change. The FPS counter samples
+  // Render loop. Re-draws on viewport change. FPS counter samples
   // recent frame intervals to surface frame-budget pressure.
   const renderSamples = useRef<number[]>([]);
   const lastFrameTimeRef = useRef<number>(0);
@@ -116,48 +142,48 @@ export function M1LineChart({ n }: { n: N }) {
       if (!ctx) return;
       const drawStart = performance.now();
 
-      // Find the visible-window row indices via bisect. Friction
-      // item #3: chart wants a `series.window(t0, t1)` convenience.
-      // For now: two bisect calls, one per endpoint.
+      // Resolve visible-window indices via bisect. Friction item F3
+      // (`bisectBegin(number)`) is still outstanding — for now we
+      // wrap raw timestamps in `Time` for the `KeyLike` argument.
       const startIdx = seriesData.series.bisect(new Time(viewport.start));
       const endIdx = seriesData.series.bisect(new Time(viewport.end));
       const visible = endIdx - startIdx;
 
-      // Slice the typed arrays (zero-copy subarray views).
-      const xs = seriesData.xs.subarray(startIdx, endIdx);
-      const ys = seriesData.ys.subarray(startIdx, endIdx);
-
       // Clear.
       ctx.clearRect(0, 0, cssWidth, cssHeight);
 
-      if (xs.length === 0) {
-        // empty window — nothing to draw
+      if (visible <= 0) {
         recordFrame();
         return;
       }
 
-      // Compute Y extent for this slice. Could be cached if hot;
-      // computing per frame is fine for the pan/zoom story.
-      let yMin = ys[0]!;
-      let yMax = yMin;
-      for (let i = 1; i < ys.length; i += 1) {
-        const v = ys[i]!;
-        if (v < yMin) yMin = v;
-        if (v > yMax) yMax = v;
+      // Column-centric slice. Zero-copy view via the substrate's
+      // `sliceByRange`; the return type narrows to
+      // `Float64Column | ChunkedFloat64Column` so the method chain
+      // composes naturally.
+      const visibleCol = seriesData.valueCol.slice(startIdx, endIdx);
+
+      // Y extent for axis scaling — one call.
+      // (Was: a manual `for` loop tracking lo/hi.)
+      const extent = visibleCol.minMax();
+      if (!extent) {
+        recordFrame();
+        return;
       }
+      const [yMin, yMax] = extent;
       const yRange = yMax - yMin || 1;
       const xRange = viewport.end - viewport.start;
 
-      // Pixel-bucket downsampling: render at most one (min, max) line
-      // per pixel column. Without this, > 1M points = millions of
-      // sub-pixel lineTo calls and the browser stalls. The bucket
-      // size is `visible / cssWidth` rows per pixel.
       ctx.beginPath();
       ctx.strokeStyle = '#3a8fff';
       ctx.lineWidth = 1;
 
       if (visible <= cssWidth) {
-        // 1:1 — no downsampling.
+        // 1:1 — no downsampling. The chart still needs raw row-level
+        // access for inline canvas draw; we use the cached raw
+        // typed-array view (subarray over the packed Float64Array).
+        const xs = seriesData.xs.subarray(startIdx, endIdx);
+        const ys = seriesData.ys.subarray(startIdx, endIdx);
         for (let i = 0; i < xs.length; i += 1) {
           const px = ((xs[i]! - viewport.start) / xRange) * cssWidth;
           const py = cssHeight - ((ys[i]! - yMin) / yRange) * cssHeight;
@@ -165,25 +191,18 @@ export function M1LineChart({ n }: { n: N }) {
           else ctx.lineTo(px, py);
         }
       } else {
-        // Per-pixel min/max. For each pixel column, scan the rows
-        // mapped to it and draw a vertical line from min to max.
-        const rowsPerPixel = visible / cssWidth;
+        // Per-pixel min/max. The chart's headline operation collapses
+        // to one method call: `.bin(W, 'minMax')` returns
+        // `{ lo: Float64Array(W), hi: Float64Array(W) }` — exactly
+        // the stride-1 cache pattern the chart-experiment reviewer's
+        // finding called for (see RFC §8).
+        const { lo, hi } = visibleCol.bin(cssWidth, 'minMax');
         for (let px = 0; px < cssWidth; px += 1) {
-          const startRow = Math.floor(px * rowsPerPixel);
-          const endRow = Math.min(
-            Math.floor((px + 1) * rowsPerPixel),
-            ys.length,
-          );
-          if (startRow >= endRow) continue;
-          let lo = ys[startRow]!;
-          let hi = lo;
-          for (let i = startRow + 1; i < endRow; i += 1) {
-            const v = ys[i]!;
-            if (v < lo) lo = v;
-            if (v > hi) hi = v;
-          }
-          const pyLo = cssHeight - ((lo - yMin) / yRange) * cssHeight;
-          const pyHi = cssHeight - ((hi - yMin) / yRange) * cssHeight;
+          const hiVal = hi[px]!;
+          const loVal = lo[px]!;
+          if (Number.isNaN(hiVal)) continue; // empty bin — break sub-path
+          const pyHi = cssHeight - ((hiVal - yMin) / yRange) * cssHeight;
+          const pyLo = cssHeight - ((loVal - yMin) / yRange) * cssHeight;
           if (px === 0) ctx.moveTo(px, pyHi);
           ctx.lineTo(px, pyHi);
           ctx.lineTo(px, pyLo);
@@ -217,8 +236,6 @@ export function M1LineChart({ n }: { n: N }) {
       }
     }
 
-    // Initial draw + redraw whenever viewport changes (handled via
-    // the parent useEffect dep array).
     draw();
 
     return () => {
@@ -226,8 +243,7 @@ export function M1LineChart({ n }: { n: N }) {
     };
   }, [seriesData, viewport, n]);
 
-  // Pan + zoom. Pointer-event pan; wheel zoom (delta y → log-scale
-  // factor around the cursor).
+  // Pan + zoom — unchanged from the spike-accessor version.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -297,10 +313,11 @@ export function M1LineChart({ n }: { n: N }) {
           borderRadius: 4,
         }}
       >
-        N={stats.totalRows.toLocaleString()} | visible={stats.visibleRows.toLocaleString()} |
-        build={stats.buildMs.toFixed(1)} ms |
-        render last={stats.lastRenderMs.toFixed(2)} ms median={stats.medianRenderMs.toFixed(2)} ms |
-        {stats.fps.toFixed(0)} fps
+        N={stats.totalRows.toLocaleString()} | visible=
+        {stats.visibleRows.toLocaleString()} | build=
+        {stats.buildMs.toFixed(1)} ms | render last=
+        {stats.lastRenderMs.toFixed(2)} ms median=
+        {stats.medianRenderMs.toFixed(2)} ms | {stats.fps.toFixed(0)} fps
       </div>
       <canvas
         ref={canvasRef}

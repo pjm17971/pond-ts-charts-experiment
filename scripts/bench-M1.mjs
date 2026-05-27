@@ -2,14 +2,25 @@
 // browser chart. Measures the work pond-ts does per frame (not the
 // Canvas draw call, which Node can't simulate).
 //
-// What each frame does at the data layer:
-//   - bisect(t0) + bisect(t1)  ← find visible window's row indices
-//   - subarray(start, end)     ← zero-copy view of visible xs / ys
-//   - walk visible to compute Y extent (min/max for axis scaling)
+// Two paths are benched side-by-side so the M1-column-api-adoption
+// friction note can quote real numbers:
 //
-// That's the cost the chart pays even before it draws a single
-// canvas pixel. The expectation: substantially under the 16.7 ms
-// 60-fps budget, even at N=10M with a small zoom window.
+//   "spike"    — the pre-step-8 access pattern (bisect → typed-array
+//                subarray → manual min/max scan + manual per-pixel
+//                downsampler loop). Pinned in friction-notes/
+//                M1-line-chart-scaling.md.
+//   "columnar" — the post-step-8 access pattern (bisect → col.slice
+//                → col.minMax() for Y-extent → col.bin(cssWidth,
+//                'minMax') for per-pixel downsampling).
+//
+// What each frame does at the data layer is identical between the
+// two; the difference is *who* does the loop. The "spike" path
+// runs JS for-loops; the "columnar" path delegates to pond-ts's
+// reducer.reduceColumn fast paths (PR #153) and the bin fused walk
+// (PR #156). We expect the columnar path to be roughly comparable
+// or faster (monomorphic loops on TypedArrays inside the library
+// vs hot-path JS loops in the chart adapter) and substantially less
+// code.
 
 import { performance } from 'node:perf_hooks';
 import { Time, TimeSeries } from 'pond-ts';
@@ -50,6 +61,7 @@ function bench(label, fn, repeats = 30) {
 }
 
 const sizes = [100_000, 1_000_000, 10_000_000];
+const cssWidth = 1024; // representative chart pixel width
 const results = [];
 
 for (const N of sizes) {
@@ -65,54 +77,156 @@ for (const N of sizes) {
   const xs = series.keyColumn().begin;
   const ys = valueCol.values;
 
-  // Full-window per-frame work — the "render whole series" path.
+  // ── Full-window per-frame work ─────────────────────────────
+  // (Pan-zoomed all the way out — render the whole series.)
+  //
+  // Spike path: bisect endpoints, subarray, manual min/max scan,
+  // manual per-pixel min/max downsampler loop.
   results.push(
-    bench(`per-frame full-window / N=${N}`, () => {
+    bench(`spike / per-frame full-window / N=${N}`, () => {
       const startIdx = series.bisect(new Time(xs[0]));
       const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
       const visXs = xs.subarray(startIdx, endIdx);
       const visYs = ys.subarray(startIdx, endIdx);
-      let lo = visYs[0];
-      let hi = lo;
-      for (let i = 1; i < visYs.length; i += 1) {
+      const visible = visYs.length;
+      // Y extent
+      let yLo = visYs[0];
+      let yHi = yLo;
+      for (let i = 1; i < visible; i += 1) {
         const v = visYs[i];
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
+        if (v < yLo) yLo = v;
+        if (v > yHi) yHi = v;
       }
-      if (visXs[0] === Number.POSITIVE_INFINITY) throw new Error('unreachable');
+      // Per-pixel min/max into Float64Arrays (matches canvas draw input).
+      const binLo = new Float64Array(cssWidth);
+      const binHi = new Float64Array(cssWidth);
+      const rowsPerPixel = visible / cssWidth;
+      for (let px = 0; px < cssWidth; px += 1) {
+        const start = Math.floor(px * rowsPerPixel);
+        const end = Math.min(Math.floor((px + 1) * rowsPerPixel), visible);
+        if (start >= end) {
+          binLo[px] = NaN;
+          binHi[px] = NaN;
+          continue;
+        }
+        let lo = visYs[start];
+        let hi = lo;
+        for (let i = start + 1; i < end; i += 1) {
+          const v = visYs[i];
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+        binLo[px] = lo;
+        binHi[px] = hi;
+      }
+      if (visXs[0] === Number.POSITIVE_INFINITY || yHi === Number.POSITIVE_INFINITY) {
+        throw new Error('unreachable');
+      }
     }),
   );
 
-  // Zoomed-in per-frame work — 1% of the series. Represents the
-  // typical interactive zoom state.
+  // Columnar path: bisect endpoints, col.slice, col.minMax,
+  // col.bin(cssWidth, 'minMax').
+  results.push(
+    bench(`columnar / per-frame full-window / N=${N}`, () => {
+      const startIdx = series.bisect(new Time(xs[0]));
+      const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
+      const slice = valueCol.slice(startIdx, endIdx);
+      const extent = slice.minMax();
+      const { lo, hi } = slice.bin(cssWidth, 'minMax');
+      if (!extent || lo[0] === Number.POSITIVE_INFINITY || hi[0] === Number.POSITIVE_INFINITY) {
+        throw new Error('unreachable');
+      }
+    }),
+  );
+
+  // ── 1% zoom-in per-frame work ─────────────────────────────
+  // Typical interactive zoom state.
   const windowSize = Math.floor(N / 100);
   const t0 = xs[Math.floor(N / 2 - windowSize / 2)];
   const t1 = xs[Math.floor(N / 2 + windowSize / 2)];
+
   results.push(
-    bench(`per-frame 1%-window / N=${N}`, () => {
+    bench(`spike / per-frame 1%-window / N=${N}`, () => {
       const startIdx = series.bisect(new Time(t0));
       const endIdx = series.bisect(new Time(t1));
-      const visXs = xs.subarray(startIdx, endIdx);
       const visYs = ys.subarray(startIdx, endIdx);
-      let lo = visYs[0];
-      let hi = lo;
-      for (let i = 1; i < visYs.length; i += 1) {
+      const visible = visYs.length;
+      let yLo = visYs[0];
+      let yHi = yLo;
+      for (let i = 1; i < visible; i += 1) {
         const v = visYs[i];
-        if (v < lo) lo = v;
-        if (v > hi) hi = v;
+        if (v < yLo) yLo = v;
+        if (v > yHi) yHi = v;
       }
-      if (visXs[0] === Number.POSITIVE_INFINITY) throw new Error('unreachable');
+      if (visible <= cssWidth) {
+        // 1:1 path — no per-pixel scan
+        if (yHi === Number.POSITIVE_INFINITY) throw new Error('unreachable');
+        return;
+      }
+      const binLo = new Float64Array(cssWidth);
+      const binHi = new Float64Array(cssWidth);
+      const rowsPerPixel = visible / cssWidth;
+      for (let px = 0; px < cssWidth; px += 1) {
+        const start = Math.floor(px * rowsPerPixel);
+        const end = Math.min(Math.floor((px + 1) * rowsPerPixel), visible);
+        if (start >= end) {
+          binLo[px] = NaN;
+          binHi[px] = NaN;
+          continue;
+        }
+        let lo = visYs[start];
+        let hi = lo;
+        for (let i = start + 1; i < end; i += 1) {
+          const v = visYs[i];
+          if (v < lo) lo = v;
+          if (v > hi) hi = v;
+        }
+        binLo[px] = lo;
+        binHi[px] = hi;
+      }
+      if (yHi === Number.POSITIVE_INFINITY) throw new Error('unreachable');
+    }),
+  );
+
+  results.push(
+    bench(`columnar / per-frame 1%-window / N=${N}`, () => {
+      const startIdx = series.bisect(new Time(t0));
+      const endIdx = series.bisect(new Time(t1));
+      const slice = valueCol.slice(startIdx, endIdx);
+      const extent = slice.minMax();
+      if (!extent) throw new Error('unreachable');
+      if (endIdx - startIdx <= cssWidth) return; // 1:1 — no bin
+      const { lo, hi } = slice.bin(cssWidth, 'minMax');
+      if (lo[0] === Number.POSITIVE_INFINITY || hi[0] === Number.POSITIVE_INFINITY) {
+        throw new Error('unreachable');
+      }
     }),
   );
 }
 
 console.log(JSON.stringify(results, null, 2));
 
-const oneM = results.find((r) => r.label === 'per-frame full-window / N=1000000');
-const tenM = results.find(
-  (r) => r.label === 'per-frame full-window / N=10000000',
-);
-console.log(
-  `\nframe-budget: full-window 1M = ${oneM?.medianMs} ms (${Math.floor(16.7 / (oneM?.medianMs || 1))} per 60-fps frame), ` +
-    `full-window 10M = ${tenM?.medianMs} ms.`,
-);
+// Print a compact summary table for the friction note.
+console.log('\nframe-budget summary (full-window):');
+for (const N of sizes) {
+  const spike = results.find((r) => r.label === `spike / per-frame full-window / N=${N}`);
+  const cols = results.find((r) => r.label === `columnar / per-frame full-window / N=${N}`);
+  const delta = cols && spike ? (cols.medianMs / spike.medianMs - 1) * 100 : 0;
+  console.log(
+    `  N=${N.toString().padStart(8)} | spike ${spike?.medianMs.toFixed(3).padStart(7)} ms ` +
+      `| columnar ${cols?.medianMs.toFixed(3).padStart(7)} ms ` +
+      `| Δ ${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%`,
+  );
+}
+console.log('\nframe-budget summary (1% zoom):');
+for (const N of sizes) {
+  const spike = results.find((r) => r.label === `spike / per-frame 1%-window / N=${N}`);
+  const cols = results.find((r) => r.label === `columnar / per-frame 1%-window / N=${N}`);
+  const delta = cols && spike ? (cols.medianMs / spike.medianMs - 1) * 100 : 0;
+  console.log(
+    `  N=${N.toString().padStart(8)} | spike ${spike?.medianMs.toFixed(3).padStart(7)} ms ` +
+      `| columnar ${cols?.medianMs.toFixed(3).padStart(7)} ms ` +
+      `| Δ ${delta >= 0 ? '+' : ''}${delta.toFixed(1)}%`,
+  );
+}
