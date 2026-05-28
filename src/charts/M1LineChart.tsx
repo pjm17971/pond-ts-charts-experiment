@@ -26,9 +26,14 @@
 //     `Float64Array` is exactly what canvas wants. Step 8d
 //     (`KeyColumn.slice`) tidied the per-row access; the bulk
 //     `.begin` read stays direct.
-//   - `series.bisect(new Time(ts))` for window resolution —
-//     still a `KeyLike` argument. Friction item F3 (number-in,
-//     number-out `bisectBegin`) is still outstanding.
+//   - `series.bisect(ts)` for window resolution. Raw `number`
+//     is a valid `KeyLike` (= `TimestampInput`), so no wrapping
+//     is needed at the call site. Internally pond-ts still
+//     allocates a `Time` per bisect for the comparison, but
+//     the chart never has to think about that — and at 60 fps
+//     × 2 bisects/frame it's never been a measurable cliff.
+//     M1.4 closed F3 by dropping the redundant `new Time(...)`
+//     wraps that the spike-era chart code carried.
 //
 // Architecture is unchanged:
 //   - One <canvas> at fixed pixel size (devicePixelRatio-aware).
@@ -37,7 +42,7 @@
 //   - Per-frame timing recorded for the stats overlay.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Time, TimeSeries } from 'pond-ts';
+import { TimeSeries } from 'pond-ts';
 
 type N = 100_000 | 1_000_000 | 10_000_000;
 
@@ -120,8 +125,10 @@ export function M1LineChart({ n }: { n: N }) {
   const [canvasCssWidth, setCanvasCssWidth] = useState<number>(0);
 
   // Derived hover values. The chart resolves cursor X to a row index
-  // via the same `bisect` it uses for the visible window — same F3
-  // friction (`new Time(t)`) but only once per hover, not per frame.
+  // via the same `bisect` it uses for the visible window — passes
+  // the raw timestamp directly (pond-ts' `KeyLike` accepts `number`
+  // via `TimestampInput`; M1.4 dropped the redundant `new Time(...)`
+  // wrap the spike-era code carried).
   //
   // Both axes use the column-API now:
   //   - `valueCol.at(idx)` — pond-ts step 8b, returns `number |
@@ -140,7 +147,7 @@ export function M1LineChart({ n }: { n: N }) {
     if (hoverX === null || canvasCssWidth <= 0) return null;
     const xRange = viewport.end - viewport.start;
     const t = viewport.start + (hoverX / canvasCssWidth) * xRange;
-    const idx = seriesData.series.bisect(new Time(t));
+    const idx = seriesData.series.bisect(t);
     if (idx < 0 || idx >= seriesData.series.length) return null;
     const value = seriesData.valueCol.at(idx);
     if (value === undefined) return null;
@@ -186,8 +193,8 @@ export function M1LineChart({ n }: { n: N }) {
       // Resolve visible-window indices via bisect. Friction item F3
       // (`bisectBegin(number)`) is still outstanding — for now we
       // wrap raw timestamps in `Time` for the `KeyLike` argument.
-      const startIdx = seriesData.series.bisect(new Time(viewport.start));
-      const endIdx = seriesData.series.bisect(new Time(viewport.end));
+      const startIdx = seriesData.series.bisect(viewport.start);
+      const endIdx = seriesData.series.bisect(viewport.end);
       const visible = endIdx - startIdx;
 
       // Clear.

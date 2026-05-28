@@ -107,22 +107,32 @@ For M1 the type-annotation friction was minor (`Float64Array`
 worked structurally), but the re-export is what future milestones
 (M3 chunked-column rendering) will need to type their adapters.
 
-### F3. `bisect` allocates a `Time` per probe — **unchanged**
+### F3. `bisect` allocates a `Time` per probe — **fully retired**
 
-The chart still does:
+The original framing claimed the chart "re-wraps a number into a
+`Time` so pond-ts can re-extract the number inside `bisect`." That
+was half-right:
 
-```ts
-const startIdx = seriesData.series.bisect(new Time(viewport.start));
-```
+- `series.bisect(key)` accepts a `KeyLike`, and `KeyLike` includes
+  `TimestampInput = number | Date`. So the chart can — and now
+  does — write `series.bisect(viewport.start)` directly. The
+  spike-era chart's `new Time(viewport.start)` wrap was
+  **redundant**, not forced by the API.
+- Internally, `bisect` still routes through `toKey()`, which
+  allocates a `Time` for raw number / Date inputs. So one `Time`
+  allocation per `bisect` call still happens — but it happens
+  whether the caller wrapped or not. The chart's redundant outer
+  wrap was just doubling that single internal alloc into two.
 
-Two allocations per frame plus log₂(N) comparisons each. V8's
-nursery handles it; not a measurable perf cliff at 60 fps, but the
-**API ergonomics** complaint stands: the chart is on the
-typed-array layer and re-wraps a number into a class just to do a
-binary search.
+**M1.4 close**: dropped the redundant `new Time(...)` wraps from
+M1 / M2 chart code + the M1 / M2 benches. The internal
+`toKey()`-allocates-Time path remains as substrate behavior —
+never a measured perf cliff (V8 nursery handles 120 allocs/sec
+fine), and the original carry-forward (`bisectBegin(ts: number):
+number`) was deferred as "no justification for new API surface."
 
-**Library-actionable carry-forward (unchanged):**
-- `series.bisectBegin(ts: number): number` — number-in, number-out.
+**Status**: closed by chart-side cleanup + honest re-read of the
+existing pond-ts API. No library change.
 
 ### F4. Narrowing-chain switch with 8 cases — **mostly retired**
 
@@ -336,35 +346,34 @@ downsampler loop is gone.
 
 ## Library-actionable items (carry-forward)
 
-In priority order — what to file as PRs against pond-ts:
+In priority order — refreshed after M1.4 closed F3 (no API change
+needed; the chart was doing unnecessary work).
 
-1. **`series.bisectBegin(ts: number): number`.** Number-in,
-   number-out. F3 unchanged from M1.0; ergonomic, not a perf
-   cliff. Hits both the per-frame bisect AND the per-hover bisect
-   (M1.3 made the key-axis access column-centric, but bisect is
-   the lone remaining `KeyLike`-shaped boundary).
-2. **`col.toFloat64Array(): Float64Array`** (and `toUint8Array()`
-   on Boolean, etc.). One method call replaces the storage check.
-   Closes F1 / NF3.
-3. **`TimeSeries.fromTrustedColumns(schema, keys, columns)`.**
+1. **`TimeSeries.fromTrustedColumns(schema, keys, columns)`.**
    Producer-side intake skipping the row-validation pass. F5
    unchanged from M1.0.
-4. **Doc: NaN empty-bin convention on `bin`.** NF1. Quick win;
+2. **Doc: NaN empty-bin convention on `bin`.** NF1. Quick win;
    note that Canvas `lineTo` handles NaN natively.
-5. **(Deferred) Pre-allocated bin output buffer.** NF2. Worth
-   landing only if a later milestone hits the small-N pattern in a
-   real workload.
 
 **Retired in this note's history:**
 
+- **F1 / NF3 / MF4 — kind/storage dispatch** closed by pond-ts
+  PR #165's `col.toFloat64Array()`. Chart adopted in M2.3.
 - **NF4 — `KeyColumn.at`** closed by pond-ts 8d
   ([#159](https://github.com/pjm17971/pond-ts/pull/159)). M1.3
   adopted `keys.at(idx)` in the hover useMemo.
+- **F3 — `bisect` re-wraps a number** closed by M1.4 chart-side
+  cleanup (no API change). `series.bisect(viewport.start)` was
+  always valid; the spike-era chart's `new Time(...)` wrap was
+  redundant. Internal `Time` allocation per probe remains but
+  V8's nursery handles 120/sec without a measurable cliff —
+  never earned a new public method.
+- **NF2 — pre-allocated bin output buffer.** Tried in pond-ts
+  PR #161, measured negligible win after M2.2's yfrombins
+  reorganization landed; reverted in PR #164. Honest walk-back.
 
-Item 1 is now the only "this is awkward in practice" item left at
-the hover/per-frame boundary. Items 2-3 are real but the chart
-can work around. Item 4 is producer-side. Items 5-6 are
-doc-only / defer-until-friction.
+The remaining open items are doc-only / producer-side. M1's
+chart-hot-path friction is fully addressed.
 
 ## Bench numbers (Node-side)
 

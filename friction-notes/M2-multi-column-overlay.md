@@ -354,25 +354,22 @@ new library-actionable shape.
 
 ## Library-actionable items (carry-forward)
 
-In priority order — refreshed after M2.3 closed MF4 / F1 / NF3.
+In priority order — refreshed after M1.4 closed F3 (no API change
+needed) and M2.3 closed MF4 / F1 / NF3.
 
-1. **`series.bisectBegin(ts: number): number`** — F3 unchanged
-   from M1.0. Two bisects per frame + N per hover; the per-frame
-   case is the load-bearing one. Now the lone remaining
-   ergonomic friction item at the chart hot path.
-2. **MF1: shared Y extent across columns is hand-rolled.**
+1. **MF1: shared Y extent across columns is hand-rolled.**
    Status downgraded: M2.2 showed the chart can compute Y from
    bin output in 6 lines and gets the 60fps win as a bonus. A
    `series.multiMinMax(cols)` library primitive is no longer
    load-bearing — the friction is "shape-level" not "perf-level."
    Keep on the list as a "consolidation candidate" only.
-3. **Doc: per-row reads.** Mention that `series.rows[idx]`
+2. **Doc: per-row reads.** Mention that `series.rows[idx]`
    handles the "row at idx" pattern for tooltip-style consumers
    when per-column composition feels heavy. MF3 closes itself
    with a doc nudge.
-4. **`TimeSeries.fromTrustedColumns(...)`** — F5 unchanged from
+3. **`TimeSeries.fromTrustedColumns(...)`** — F5 unchanged from
    M1.0. Producer-side.
-5. **Doc: NaN empty-bin convention** — NF1 unchanged from M1.1.
+4. **Doc: NaN empty-bin convention** — NF1 unchanged from M1.1.
 
 **Retired since M2.0:**
 
@@ -382,6 +379,15 @@ In priority order — refreshed after M2.3 closed MF4 / F1 / NF3.
   commit adopted it across extraction + 1:1 walk paths in
   M1LineChart, M2MultiColumnChart, bench-M1.mjs, bench-M2.mjs.
   Zero storage checks in the chart anymore.
+- **F3 (bisect re-wraps a number)** — closed by M1.4 chart-side
+  cleanup (no library change). The original friction framing
+  said the chart was forced to `new Time(viewport.start)` before
+  calling `bisect`. Honest re-read: `bisect` always accepted a
+  raw `number` (via `KeyLike` → `TimestampInput = number | Date`);
+  the wrap was the chart's redundant choice. M1.4 dropped it
+  across all four chart files. Pond-ts still allocates a `Time`
+  internally per probe via `toKey()`, but V8's nursery handles
+  120 allocs/sec fine and no new method earned its surface.
 
 **Retired in this note's history:**
 

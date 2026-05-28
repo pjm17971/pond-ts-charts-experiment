@@ -26,7 +26,7 @@
 // note's MF2 history.
 
 import { performance } from 'node:perf_hooks';
-import { Time, TimeSeries } from 'pond-ts';
+import { TimeSeries } from 'pond-ts';
 
 const SCHEMA = Object.freeze([
   { name: 'time', kind: 'time' },
@@ -94,8 +94,8 @@ for (const N of sizes) {
   // ── Full-window per-frame work ─────────────────────────────
   results.push(
     bench(`columnar / per-frame full-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(xs[0]));
-      const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
+      const startIdx = series.bisect(xs[0]);
+      const endIdx = series.bisect(xs[xs.length - 1] + 1);
       // Three slices.
       const slices = cols.map((c) => c.slice(startIdx, endIdx));
       // Three minMax for shared Y.
@@ -125,8 +125,8 @@ for (const N of sizes) {
   // three O(W) post-passes over Float64Array(1024).
   results.push(
     bench(`columnar+yfrombins / per-frame full-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(xs[0]));
-      const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
+      const startIdx = series.bisect(xs[0]);
+      const endIdx = series.bisect(xs[xs.length - 1] + 1);
       const slices = cols.map((c) => c.slice(startIdx, endIdx));
       let yMin = Infinity;
       let yMax = -Infinity;
@@ -162,8 +162,8 @@ for (const N of sizes) {
   ];
   results.push(
     bench(`fused / per-frame full-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(xs[0]));
-      const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
+      const startIdx = series.bisect(xs[0]);
+      const endIdx = series.bisect(xs[xs.length - 1] + 1);
       const visible = endIdx - startIdx;
       let yMin = Infinity;
       let yMax = -Infinity;
@@ -207,8 +207,8 @@ for (const N of sizes) {
 
   results.push(
     bench(`columnar / per-frame 1%-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(t0));
-      const endIdx = series.bisect(new Time(t1));
+      const startIdx = series.bisect(t0);
+      const endIdx = series.bisect(t1);
       const slices = cols.map((c) => c.slice(startIdx, endIdx));
       let yMin = Infinity;
       let yMax = -Infinity;

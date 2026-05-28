@@ -26,7 +26,7 @@
 //     chart adapter would expose.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Time, TimeSeries } from 'pond-ts';
+import { TimeSeries } from 'pond-ts';
 
 type N = 100_000 | 1_000_000 | 10_000_000;
 
@@ -127,7 +127,7 @@ export function M2MultiColumnChart({ n }: { n: N }) {
     if (hoverX === null || canvasCssWidth <= 0) return null;
     const xRange = viewport.end - viewport.start;
     const t = viewport.start + (hoverX / canvasCssWidth) * xRange;
-    const idx = seriesData.series.bisect(new Time(t));
+    const idx = seriesData.series.bisect(t);
     if (idx < 0 || idx >= seriesData.series.length) return null;
     const time = seriesData.keys.at(idx);
     if (time === undefined) return null;
@@ -173,8 +173,8 @@ export function M2MultiColumnChart({ n }: { n: N }) {
       if (!ctx) return;
       const drawStart = performance.now();
 
-      const startIdx = seriesData.series.bisect(new Time(viewport.start));
-      const endIdx = seriesData.series.bisect(new Time(viewport.end));
+      const startIdx = seriesData.series.bisect(viewport.start);
+      const endIdx = seriesData.series.bisect(viewport.end);
       const visible = endIdx - startIdx;
 
       ctx.clearRect(0, 0, cssWidth, cssHeight);

@@ -23,7 +23,7 @@
 // code.
 
 import { performance } from 'node:perf_hooks';
-import { Time, TimeSeries } from 'pond-ts';
+import { TimeSeries } from 'pond-ts';
 
 const SCHEMA = Object.freeze([
   { name: 'time', kind: 'time' },
@@ -84,8 +84,8 @@ for (const N of sizes) {
   // manual per-pixel min/max downsampler loop.
   results.push(
     bench(`spike / per-frame full-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(xs[0]));
-      const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
+      const startIdx = series.bisect(xs[0]);
+      const endIdx = series.bisect(xs[xs.length - 1] + 1);
       const visXs = xs.subarray(startIdx, endIdx);
       const visYs = ys.subarray(startIdx, endIdx);
       const visible = visYs.length;
@@ -129,8 +129,8 @@ for (const N of sizes) {
   // col.bin(cssWidth, 'minMax').
   results.push(
     bench(`columnar / per-frame full-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(xs[0]));
-      const endIdx = series.bisect(new Time(xs[xs.length - 1] + 1));
+      const startIdx = series.bisect(xs[0]);
+      const endIdx = series.bisect(xs[xs.length - 1] + 1);
       const slice = valueCol.slice(startIdx, endIdx);
       const extent = slice.minMax();
       const { lo, hi } = slice.bin(cssWidth, 'minMax');
@@ -148,8 +148,8 @@ for (const N of sizes) {
 
   results.push(
     bench(`spike / per-frame 1%-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(t0));
-      const endIdx = series.bisect(new Time(t1));
+      const startIdx = series.bisect(t0);
+      const endIdx = series.bisect(t1);
       const visYs = ys.subarray(startIdx, endIdx);
       const visible = visYs.length;
       let yLo = visYs[0];
@@ -191,8 +191,8 @@ for (const N of sizes) {
 
   results.push(
     bench(`columnar / per-frame 1%-window / N=${N}`, () => {
-      const startIdx = series.bisect(new Time(t0));
-      const endIdx = series.bisect(new Time(t1));
+      const startIdx = series.bisect(t0);
+      const endIdx = series.bisect(t1);
       const slice = valueCol.slice(startIdx, endIdx);
       const extent = slice.minMax();
       if (!extent) throw new Error('unreachable');
