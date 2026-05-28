@@ -89,7 +89,7 @@ for (const N of sizes) {
   const cols = [cpuCol, memCol, ioCol];
   const keys = series.keyColumn();
   const xs = keys.begin;
-  const ysAll = cols.map((c) => c.values);
+  const ysAll = cols.map((c) => c.toFloat64Array());
 
   // ── Full-window per-frame work ─────────────────────────────
   results.push(

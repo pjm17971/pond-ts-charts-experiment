@@ -89,19 +89,15 @@ export function M2MultiColumnChart({ n }: { n: N }) {
 
     const keys = series.keyColumn();
 
-    // Per-column extraction. Each column needs its own storage
-    // check because pond-ts doesn't yet expose a storage-agnostic
-    // `col.toFloat64Array()` (F1 / NF3 carry-forward). The check
-    // is uniform across columns but it's three of them.
-    const valueCols = COLUMNS.map((cfg) => {
-      const col = series.column(cfg.name);
-      if (col.storage !== 'packed') {
-        throw new Error(
-          `M2 expected packed Float64 for column '${cfg.name}'; got storage=${col.storage}`,
-        );
-      }
-      return col;
-    });
+    // Per-column extraction. Schema-narrowed `series.column(name)`
+    // returns `Float64Column | ChunkedFloat64Column` — no kind
+    // check needed. The M2.0/M2.1-era storage check (whether the
+    // column is packed or chunked) is also gone: pond-ts now
+    // exposes `toFloat64Array()` as a storage-agnostic gather, so
+    // chart adapters that want raw `Float64Array` access no
+    // longer have to discriminate. Closes the chart side of F1 /
+    // NF3 / MF4.
+    const valueCols = COLUMNS.map((cfg) => series.column(cfg.name));
 
     return { series, keys, valueCols, buildMs };
   }, [n]);
@@ -239,7 +235,11 @@ export function M2MultiColumnChart({ n }: { n: N }) {
         }
       } else {
         for (let c = 0; c < COLUMNS.length; c += 1) {
-          const ys = slices[c]!.values;
+          // Storage-agnostic gather — works for both packed and
+          // chunked. For the 1:1 case the slice is small (≤
+          // cssWidth rows ≈ 1024), so any gather cost is
+          // microseconds.
+          const ys = slices[c]!.toFloat64Array();
           for (let i = 0; i < ys.length; i += 1) {
             const v = ys[i]!;
             if (v < yMin) yMin = v;
@@ -274,10 +274,12 @@ export function M2MultiColumnChart({ n }: { n: N }) {
           const out = binOutputs[c]!;
           renderBinned(out.lo, out.hi);
         } else {
-          // 1:1 path — raw values from the packed column slice.
-          // For chunked support, M3 will need a different path.
+          // 1:1 path — raw values via the storage-agnostic gather.
+          // For packed slices (the common case), toFloat64Array
+          // returns the underlying buffer directly with no copy.
+          // For chunked, it materialises through the substrate.
           const xs = seriesData.keys.begin.subarray(startIdx, endIdx);
-          const ys = slice.values;
+          const ys = slice.toFloat64Array();
           for (let i = 0; i < xs.length; i += 1) {
             const px = ((xs[i]! - viewport.start) / xRange) * cssWidth;
             const py = cssHeight - ((ys[i]! - yMin) / yRange) * cssHeight;

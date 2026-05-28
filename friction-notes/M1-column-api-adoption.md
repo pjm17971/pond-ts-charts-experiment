@@ -48,7 +48,7 @@ is the spike version; HEAD is the column-centric version.
 
 ## Friction items: status update
 
-### F1. Kind/storage dispatch — **mostly retired (was 3 guards, now 1)**
+### F1. Kind/storage dispatch — **fully retired**
 
 The spike version:
 
@@ -77,24 +77,19 @@ overload was deliberately not exposed).
 The `| undefined` check is gone — the schema-narrowed return type
 never includes `undefined`.
 
-The `storage !== 'packed'` check remains because the chart's 1:1
-draw path wants raw `Float64Array` for inline `moveTo`/`lineTo`,
-and `ChunkedFloat64Column` doesn't expose a single contiguous
-buffer (it can't, by construction). The chart could call a
-substrate-internal `materializeChunkedFloat64()` to gather, but
-that helper isn't on the public column surface — and a real chart
-library would want a one-shot `col.toFloat64Array(): Float64Array`
-that's identity-on-packed and gather-on-chunked.
+**Status (M1.4 update):** Fully retired. pond-ts PR #165 shipped
+`col.toFloat64Array()` — storage-agnostic gather (identity-on-
+packed, gather-on-chunked, length-bounded). The chart now reads
+the raw `Float64Array` via:
 
-**Status:** 2 of 3 guards retired. The remaining storage check is
-still real friction for cross-storage chart code (M3 will pin this
-hard).
+```ts
+const valueCol = series.column('value');
+const ys: Float64Array = valueCol.toFloat64Array();
+```
 
-**Library-actionable carry-forward:**
-- `col.toFloat64Array(): Float64Array` (identity-on-packed,
-  gather-on-chunked) would close this entirely. Lives next to the
-  `at` / `slice` / `values` family on `Float64Column`. Same shape
-  for `Uint8Array` on `BooleanColumn`, etc.
+Zero guards. Works uniformly for packed and chunked. Closes F1
+fully — and folds NF3 in (which was the "1:1 path still wants
+raw `.values`" sibling-of-F1 finding).
 
 ### F2. Type re-exports — **fully retired**
 
@@ -252,20 +247,21 @@ microbenchmark artifact, not a chart problem.
   per-frame allocation. Worth landing if M3 (chunked) or M5
   (heatmap) hits it, otherwise defer.
 
-### NF3. The 1:1 path still wants raw `.values`
+### NF3. The 1:1 path still wants raw `.values` — **fully retired**
 
 For the 1:1 path (visible ≤ cssWidth) the chart wants raw
-`Float64Array` for inline canvas draw. The new column API gives the
-chart `col.slice(s, e)` returning a `Float64Column` view, but the
-chart still reaches for `.values` underneath.
+`Float64Array` for inline canvas draw. M1.1 noted that the
+column API gives `col.slice(s, e)` returning a `Float64Column`
+view but the chart still reached for `.values` underneath; M1.2
+deepened the observation.
 
-`col.scan(fn)` is the substrate's storage-agnostic iteration
-primitive, but the closure-per-iteration overhead is measurable for
-1M+ rows in JS. M1 keeps a raw-typed-array fast path for now.
-
-This is a partial duplicate of F1's carry-forward: a
-`col.toFloat64Array()` would let the 1:1 path stay storage-agnostic
-without paying the scan closure cost.
+**Status:** Closed by pond-ts PR #165's `col.toFloat64Array()`.
+The chart's 1:1 path now reads `slice.toFloat64Array()` —
+storage-agnostic, length-bounded, identity-when-possible
+(`col.values` reference for the typical packed-exact-sized
+case; subarray view for oversized; fresh allocation for
+chunked). The chart adapter no longer reaches into substrate
+internals for the 1:1 fast path.
 
 ### NF4. Hover/tooltip flow wants `keyColumn().at(i)` — **fully retired**
 

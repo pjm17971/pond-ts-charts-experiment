@@ -18,15 +18,14 @@
 //     cleanly.
 //
 // What still touches raw substrate:
-//   - The 1:1 fast path (visible ≤ cssWidth) wants raw `Float64Array`
-//     values for inline moveTo/lineTo. `col.scan(fn)` would work
-//     storage-agnostically but the closure overhead is measurable
-//     at 1M+ rows. M1's data is always packed (built from rows)
-//     so we keep a single `storage === 'packed'` assertion at
-//     extraction and use raw `.values` from there.
+//   - The 1:1 fast path (visible ≤ cssWidth) wants a raw
+//     `Float64Array` for inline moveTo/lineTo. We get one via
+//     `valueCol.toFloat64Array()` (pond-ts PR #165) — storage-
+//     agnostic, length-bounded, no storage check needed.
 //   - `series.keyColumn().begin` for x-axis projection — raw
 //     `Float64Array` is exactly what canvas wants. Step 8d
-//     (`KeyColumn.slice`) will tidy this further; not needed yet.
+//     (`KeyColumn.slice`) tidied the per-row access; the bulk
+//     `.begin` read stays direct.
 //   - `series.bisect(new Time(ts))` for window resolution —
 //     still a `KeyLike` argument. Friction item F3 (number-in,
 //     number-out `bisectBegin`) is still outstanding.
@@ -81,30 +80,27 @@ export function M1LineChart({ n }: { n: N }) {
   //   - no `| undefined` (RFC §7.2 — typos and key-column names
   //     fail to compile rather than returning undefined at runtime).
   //
-  // Only the storage check remains — and only because the 1:1 path
-  // wants raw `.values` for inline canvas draw. For series built
-  // from rows this is always 'packed'; chunked surfaces only after
-  // `concatSorted` and is M3's concern.
+  // No storage check needed: `valueCol.toFloat64Array()` is
+  // storage-agnostic — identity-on-packed, gather-on-chunked
+  // (pond-ts PR #165). M1's data is always packed in practice
+  // (row-built series); chunked would only appear post-
+  // `concatSorted`, and even then `toFloat64Array` handles it.
+  // This retires the M1/M2 F1 / NF3 / MF4 friction items in the
+  // chart code.
   const seriesData = useMemo(() => {
     const buildStart = performance.now();
     const series = buildSeries(n);
     const buildMs = performance.now() - buildStart;
 
-    const valueCol = series.column('value');
-    if (valueCol.storage !== 'packed') {
-      // M1's data is always packed. Chunked → M3.
-      throw new Error(
-        `M1 expected a packed Float64 column; got storage=${valueCol.storage}`,
-      );
-    }
     // Cache the schema-narrowed key column (pond-ts step 8d).
     // `keyColumn()` is a field access on the underlying store, so
     // calling it once and caching is the same cost as inlining;
     // doing it here lets the hover useMemo reach for the column
     // API (`keys.at(idx)`) without re-resolving.
+    const valueCol = series.column('value');
     const keys = series.keyColumn();
     const xs: Float64Array = keys.begin;
-    const ys: Float64Array = valueCol.values;
+    const ys: Float64Array = valueCol.toFloat64Array();
     return { series, valueCol, keys, xs, ys, buildMs };
   }, [n]);
 

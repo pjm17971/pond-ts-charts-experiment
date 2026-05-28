@@ -228,10 +228,9 @@ exists and works. Worth a heads-up in the column-API docs that
 "per-row reads for tooltips use `series.rows[idx]`; per-column
 reads for hot paths use `col.at(idx)`."
 
-### MF4. Per-column storage check × N
+### MF4. Per-column storage check × N — **fully retired**
 
-Same residual storage-check friction as M1.1's F1, just multiplied
-by the column count:
+M2.0 had this awkward pattern:
 
 ```ts
 const valueCols = COLUMNS.map((cfg) => {
@@ -241,11 +240,19 @@ const valueCols = COLUMNS.map((cfg) => {
 });
 ```
 
-Three columns → three storage checks. Closes on the same library-
-actionable as F1's carry-forward: `col.toFloat64Array(): Float64Array`
-(identity-on-packed, gather-on-chunked) would let the chart write
-`COLUMNS.map((cfg) => series.column(cfg.name).toFloat64Array())`
-with no per-column check.
+Three columns → three storage checks.
+
+**Status:** Closed by pond-ts PR #165's `col.toFloat64Array()`.
+M2's per-column extraction now reads:
+
+```ts
+const valueCols = COLUMNS.map((cfg) => series.column(cfg.name));
+```
+
+No per-column storage check. Anywhere the chart wants a raw
+`Float64Array` (1:1 path, Y-extent walk over slice), it calls
+`slice.toFloat64Array()` — storage-agnostic, length-bounded.
+Closes MF4 and the chart side of F1 / NF3.
 
 ## Bench numbers (Node-side)
 
@@ -347,28 +354,34 @@ new library-actionable shape.
 
 ## Library-actionable items (carry-forward)
 
-In priority order — refreshed after M2.2 closed MF2 fully.
+In priority order — refreshed after M2.3 closed MF4 / F1 / NF3.
 
-1. **`col.toFloat64Array(): Float64Array`** — closes MF4 / F1 /
-   NF3. Three storage checks across columns collapse to three
-   one-liners with this. Substrate has `materializeChunkedFloat64`
-   already; just needs a public method.
-2. **`series.bisectBegin(ts: number): number`** — F3 unchanged
+1. **`series.bisectBegin(ts: number): number`** — F3 unchanged
    from M1.0. Two bisects per frame + N per hover; the per-frame
-   case is the load-bearing one.
-3. **MF1: shared Y extent across columns is hand-rolled.**
+   case is the load-bearing one. Now the lone remaining
+   ergonomic friction item at the chart hot path.
+2. **MF1: shared Y extent across columns is hand-rolled.**
    Status downgraded: M2.2 showed the chart can compute Y from
    bin output in 6 lines and gets the 60fps win as a bonus. A
    `series.multiMinMax(cols)` library primitive is no longer
    load-bearing — the friction is "shape-level" not "perf-level."
    Keep on the list as a "consolidation candidate" only.
-4. **Doc: per-row reads.** Mention that `series.rows[idx]`
+3. **Doc: per-row reads.** Mention that `series.rows[idx]`
    handles the "row at idx" pattern for tooltip-style consumers
    when per-column composition feels heavy. MF3 closes itself
    with a doc nudge.
-5. **`TimeSeries.fromTrustedColumns(...)`** — F5 unchanged from
+4. **`TimeSeries.fromTrustedColumns(...)`** — F5 unchanged from
    M1.0. Producer-side.
-6. **Doc: NaN empty-bin convention** — NF1 unchanged from M1.1.
+5. **Doc: NaN empty-bin convention** — NF1 unchanged from M1.1.
+
+**Retired since M2.0:**
+
+- **MF4 / F1 / NF3 (per-column storage check)** — closed by
+  pond-ts [#165](https://github.com/pjm17971/pond-ts/pull/165)'s
+  `col.toFloat64Array()` storage-agnostic gather. Chart's M2.3
+  commit adopted it across extraction + 1:1 walk paths in
+  M1LineChart, M2MultiColumnChart, bench-M1.mjs, bench-M2.mjs.
+  Zero storage checks in the chart anymore.
 
 **Retired in this note's history:**
 

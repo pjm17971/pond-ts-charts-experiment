@@ -75,7 +75,7 @@ for (const N of sizes) {
 
   const valueCol = series.column('value');
   const xs = series.keyColumn().begin;
-  const ys = valueCol.values;
+  const ys = valueCol.toFloat64Array();
 
   // ── Full-window per-frame work ─────────────────────────────
   // (Pan-zoomed all the way out — render the whole series.)
