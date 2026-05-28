@@ -257,8 +257,8 @@ export function M2MultiColumnChart({ n }: { n: N }) {
       // ─── Pass 2: render each line ──────────────────────────────
       //
       // Each line gets its own stroke pass; the binned path reads
-      // back the pre-allocated buffers populated during pass 1
-      // (no second bin call). The 1:1 path re-reads slice.values
+      // back the bin output populated during pass 1 (no second
+      // bin call). The 1:1 path re-reads slice.toFloat64Array()
       // — see pass 1's note on why the double-read is fine there.
       for (let c = 0; c < COLUMNS.length; c += 1) {
         const slice = slices[c]!;
