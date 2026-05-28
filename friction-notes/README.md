@@ -25,10 +25,13 @@ One file per milestone: `M<N>-<topic>.md`. Each report covers:
 | File | Workload | Status |
 | --- | --- | --- |
 | [`M1-line-chart-scaling.md`](M1-line-chart-scaling.md) | Single-column line chart, scaling | Shipped 2026-05-26 — 6 library-actionable items |
-| M2 (TBD) | Multi-column overlay | Pending |
-| M3 (TBD) | Chunked-column rendering | Pending |
-| M4 (TBD) | Range slicing for zoom | Pending |
-| M5 (TBD) | Interval-keyed heatmap | Pending |
+| [`M1-column-api-adoption.md`](M1-column-api-adoption.md) | M1.1–M1.4 column-API adoption | Shipped 2026-05-28 — closes 8a–8d adoption, F3/NF4 retired |
+| [`M2-multi-column-overlay.md`](M2-multi-column-overlay.md) | Multi-column overlay (3 lines, shared X+Y) | Shipped 2026-05-28 — load-bearing M2.2 win, `{out}` walked back |
+| [`M3-deferred.md`](M3-deferred.md) | Chunked-column rendering | ⏸ Deferred — no public path produces chunked storage today |
+| M4 | Range slicing for zoom | ✅ Implicitly validated by M1 (1%-zoom bench numbers cover the zero-copy path) |
+| [`M5-deferred.md`](M5-deferred.md) | Interval-keyed heatmap | ⏸ Deferred — substrate ready (8d), awaits real interval-keyed consumer |
+
+See [`../STATUS.md`](../STATUS.md) for the top-level landing summary.
 
 Update this table as milestones land.
 
